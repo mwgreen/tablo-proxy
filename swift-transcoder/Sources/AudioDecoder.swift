@@ -115,10 +115,18 @@ class AC3AudioDecoder {
 
         let actualBytes = Int(bufferList.mBuffers.mDataByteSize)
         guard actualBytes > 0 else { return nil }
-        let numSamples = actualBytes / bytesPerSample
 
-        return makeSampleBuffer(pcmData: outputData.prefix(actualBytes),
-                                numSamples: numSamples, pts: pts)
+        // Pad output to exactly N*1536 samples so duration matches PTS spacing.
+        // outputData is zero-initialized, so trailing bytes are silence.
+        // Without padding, the ~288-sample priming loss per batch causes audio
+        // to drift ahead of video (~3s per 10 minutes).
+        let expectedSamples = frames.count * 1536
+        let expectedBytes = expectedSamples * bytesPerSample
+        let useBytes = min(expectedBytes, maxPCMBytes)
+        let useSamples = useBytes / bytesPerSample
+
+        return makeSampleBuffer(pcmData: outputData.prefix(useBytes),
+                                numSamples: useSamples, pts: pts)
     }
 
     private func makeSampleBuffer(pcmData: Data, numSamples: Int, pts: CMTime) -> CMSampleBuffer? {

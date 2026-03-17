@@ -182,7 +182,7 @@ function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
 function cleanupSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
-  session.ffmpeg.kill('SIGINT');
+  session.ffmpeg.kill('SIGKILL');
   try { rmSync(session.dir, { recursive: true, force: true }); } catch {}
   sessions.delete(sessionId);
   console.log(`[transcode] Session ${sessionId} cleaned up`);
@@ -268,9 +268,10 @@ export function startServer(port) {
   // Clean up child processes on exit
   process.on('exit', () => {
     for (const [id, session] of sessions) {
-      try { session.ffmpeg?.kill('SIGINT'); } catch {}
-      try { session.decoder?.kill('SIGINT'); } catch {}
+      try { session.ffmpeg?.kill('SIGKILL'); } catch {}
+      try { session.decoder?.kill('SIGKILL'); } catch {}
     }
+    try { execSync('pkill -9 -f hls-transcode 2>/dev/null || true'); } catch {}
   });
   process.on('SIGINT', () => process.exit());
   process.on('SIGTERM', () => process.exit());
