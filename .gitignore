@@ -5,3 +5,7 @@ data/
 *.jpg
 .playwright-mcp/
 .claude/
+bin/ffmpeg
+bin/ffprobe
+public/test*.mp4
+swift-transcoder/.build/

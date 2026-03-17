@@ -61,9 +61,16 @@
       height: 100%; background: #e94560; border-radius: 3px; position: absolute; left: 0; top: 0;
     }
     .seek-buffered {
-      height: 100%; background: #444; border-radius: 3px; position: absolute; left: 0; top: 0;
+      height: 100%; background: #666; border-radius: 3px; position: absolute; left: 0; top: 0;
     }
     .seek-bar-wrap:hover .seek-bar { height: 10px; }
+    .seek-tooltip {
+      position: absolute; top: -28px; transform: translateX(-50%);
+      background: rgba(0,0,0,0.85); color: #fff; font-size: 12px;
+      padding: 3px 7px; border-radius: 3px; pointer-events: none;
+      white-space: nowrap; display: none; font-variant-numeric: tabular-nums;
+    }
+    .seek-bar-wrap:hover .seek-tooltip { display: block; }
     .time-label { font-size: 13px; color: #aaa; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
     .btn-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
@@ -118,6 +125,10 @@
     .status.hidden { display: none; }
     .loading { position: absolute; color: #e94560; font-size: 16px; top: 50%; left: 50%; transform: translate(-50%,-50%); }
     .loading.hidden { display: none; }
+    .buffering { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); display: none; z-index: 10; }
+    .buffering.visible { display: block; }
+    .buffering .spinner { width: 48px; height: 48px; border: 4px solid rgba(255,255,255,0.3); border-top-color: #e94560; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     .error-msg { position: absolute; color: #e94560; font-size: 14px; bottom: 100px; left: 50%; transform: translateX(-50%); white-space: nowrap; }
 
     .sidebar-search {
@@ -240,6 +251,7 @@
       <div class="loading hidden" id="loading">Loading stream...</div>
       <div class="error-msg" id="error"></div>
       <video id="video" autoplay></video>
+      <div class="buffering" id="buffering"><div class="spinner"></div></div>
       <div class="controls" id="controls">
         <div class="seek-row" id="seekRow">
           <span class="time-label" id="timeCurrent">0:00</span>
@@ -247,6 +259,7 @@
             <div class="seek-bar">
               <div class="seek-buffered" id="seekBuffered"></div>
               <div class="seek-fill" id="seekFill"></div>
+              <div class="seek-tooltip" id="seekTooltip">0:00</div>
             </div>
           </div>
           <span class="time-label" id="timeTotal">0:00</span>
@@ -305,6 +318,20 @@
     let isLive = false;
     let liveRecording = null; // non-null when watching a live channel that's being recorded
     let favorites = []; // empty = show all
+    let currentRecordingId = null;
+
+    // Resume position tracking — save to localStorage every 5 seconds
+    function saveResumePosition() {
+      if (!currentRecordingId || isLive) return;
+      const v = document.getElementById('video');
+      const pos = serverOffset + (v.currentTime || 0);
+      if (pos > 5) localStorage.setItem('resume_' + currentRecordingId, String(Math.floor(pos)));
+    }
+    function getResumePosition(recordingId) {
+      return parseInt(localStorage.getItem('resume_' + recordingId) || '0', 10);
+    }
+    setInterval(saveResumePosition, 5000);
+    window.addEventListener('beforeunload', saveResumePosition);
 
     async function init() {
       try {
@@ -349,13 +376,17 @@
       list.innerHTML = recordings.map(rec => {
         const date = rec.date ? new Date(rec.date).toLocaleDateString() : '';
         const dur = rec.duration ? Math.round(rec.duration / 60) + ' min' : '';
+        const resume = getResumePosition(rec.id);
+        const resumeText = resume > 10 && rec.duration && resume < rec.duration - 30
+          ? fmt(resume) + ' / ' + fmt(rec.duration)
+          : '';
         const meta = [rec.channel, date, dur].filter(Boolean).join(' - ');
         const epInfo = rec.seasonNumber && rec.episodeNumber
           ? `S${rec.seasonNumber}E${rec.episodeNumber}: ${rec.episode}`
           : rec.episode;
         const search = `${rec.title} ${rec.episode}`.toLowerCase();
         return `<div class="recording-item" data-search="${esc(search)}" data-duration="${rec.duration}" onclick="playRecording('${rec.id}', ${rec.duration}, this)">
-          <div class="recording-title">${esc(rec.title)}</div>
+          <div class="recording-title">${esc(rec.title)}${resumeText ? `<span style="float:right;font-size:11px;color:#e94560">${resumeText}</span>` : ''}</div>
           ${epInfo ? `<div class="recording-episode">${esc(epInfo)}</div>` : ''}
           ${meta ? `<div class="recording-meta">${esc(meta)}</div>` : ''}
         </div>`;
@@ -481,13 +512,23 @@
       clearActive();
       el.classList.add('active');
       totalDuration = duration;
-      serverOffset = 0;
       isLive = false;
       liveRecording = null;
-      await playHls(`/stream/hls/recording/${recordingId}`);
+      currentRecordingId = recordingId;
+
+      const resume = getResumePosition(recordingId);
+      if (resume > 10 && resume < duration - 30) {
+        serverOffset = resume;
+        await playHls(`/stream/hls/recording/${recordingId}?offset=${resume}`);
+      } else {
+        serverOffset = 0;
+        await playHls(`/stream/hls/recording/${recordingId}`);
+      }
     }
 
     function clearActive() {
+      saveResumePosition();
+      currentRecordingId = null;
       document.querySelectorAll('.channel-item, .recording-item').forEach(el => el.classList.remove('active'));
     }
 
@@ -537,14 +578,30 @@
           loading.textContent = 'Loading stream...';
           document.getElementById('controls').classList.add('visible');
           const lb = document.getElementById('liveBtn');
-          if (isLive) { lb.classList.remove('hidden'); lb.classList.add('at-live'); }
-          else { lb.classList.add('hidden'); }
+          if (isLive) {
+            lb.classList.remove('hidden');
+            lb.classList.add('at-live');
+            // Seek to live edge
+            video.currentTime = video.duration || 0;
+          } else {
+            lb.classList.add('hidden');
+          }
           video.play().catch(() => {});
         });
         hls.on(Hls.Events.ERROR, (event, data) => {
+          console.error('[hls.js]', data.type, data.details, data.reason || '', data.err || '');
           if (data.fatal) {
-            showError('Stream error: ' + data.type);
-            loading.classList.add('hidden');
+            // Try to recover from fatal errors
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              console.log('[hls.js] Attempting media error recovery...');
+              hls.recoverMediaError();
+            } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              console.log('[hls.js] Attempting network error recovery...');
+              hls.startLoad();
+            } else {
+              showError('Stream error: ' + data.type + ' (' + data.details + ')');
+              loading.classList.add('hidden');
+            }
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -562,12 +619,23 @@
       const v = document.getElementById('video');
       const currentAbsolute = serverOffset + (v.currentTime || 0);
       const targetAbsolute = Math.max(0, Math.min(totalDuration || Infinity, currentAbsolute + delta));
+      const targetLocal = targetAbsolute - serverOffset;
 
-      // If target is within what the video has buffered, just seek locally
-      if (v.duration && targetAbsolute >= serverOffset && targetAbsolute <= serverOffset + v.duration) {
-        v.currentTime = targetAbsolute - serverOffset;
+      // Check what's actually buffered
+      const bufEnd = v.buffered.length > 0 ? v.buffered.end(v.buffered.length - 1) : 0;
+      const bufStart = v.buffered.length > 0 ? v.buffered.start(0) : 0;
+
+      if (targetLocal >= bufStart && targetLocal <= bufEnd) {
+        // Target is in the buffer — just seek locally
+        v.currentTime = targetLocal;
+      } else if (targetLocal >= 0 && targetLocal <= bufEnd + 2) {
+        // Slightly past buffer end — clamp to buffer end
+        v.currentTime = Math.max(0, bufEnd - 0.5);
+      } else if (isLive && targetLocal > bufEnd) {
+        // Live: can't go past live edge — clamp
+        v.currentTime = Math.max(0, bufEnd - 0.5);
       } else {
-        // Need server-side seek
+        // Outside buffer — server-side seek
         serverSeek(targetAbsolute);
       }
     }
@@ -606,7 +674,6 @@
 
     function goLive() {
       if (liveRecording) {
-        // Seek to the current live edge in the recording
         const recStart = new Date(liveRecording.date).getTime();
         const liveOffset = Math.max(0, (Date.now() - recStart) / 1000 - 5);
         serverSeek(liveOffset);
@@ -616,6 +683,8 @@
       const v = document.getElementById('video');
       v.currentTime = v.duration || 0;
       v.play().catch(() => {});
+      // Force LIVE state immediately — don't wait for timeupdate
+      document.getElementById('liveBtn').classList.add('at-live');
     }
 
     let savedVolume = 1;
@@ -711,21 +780,39 @@
     video.addEventListener('play', () => { document.getElementById('playpause').innerHTML = '&#9208;'; });
     video.addEventListener('pause', () => { document.getElementById('playpause').innerHTML = '&#9654;'; });
 
+    // Buffering spinner
+    const bufSpinner = document.getElementById('buffering');
+    video.addEventListener('waiting', () => bufSpinner.classList.add('visible'));
+    video.addEventListener('playing', () => bufSpinner.classList.remove('visible'));
+    video.addEventListener('seeked', () => bufSpinner.classList.remove('visible'));
+    video.addEventListener('canplay', () => bufSpinner.classList.remove('visible'));
+
     function updateControls() {
       const v = document.getElementById('video');
       const seekRow = document.getElementById('seekRow');
       const lb = document.getElementById('liveBtn');
 
       if (isLive && !liveRecording) {
-        // Pure live mode: hide seek bar
-        seekRow.style.display = 'none';
-        const lag = (v.duration || 0) - (v.currentTime || 0);
-        lb.classList.toggle('at-live', lag < 10);
+        // Live mode with rewind buffer
+        seekRow.style.display = 'flex';
+        const total = v.duration || 0;
+        const current = v.currentTime || 0;
+        const lag = total - current;
+
+        document.getElementById('timeCurrent').textContent = fmt(current);
+        document.getElementById('timeTotal').textContent = fmt(total);
+
+        const pct = total > 0 ? (current / total) * 100 : 0;
+        document.getElementById('seekFill').style.width = pct + '%';
+        document.getElementById('seekBuffered').style.width = '100%';
+
+        lb.classList.toggle('at-live', lag < 30);
       } else {
         // Recording mode or live+recording hybrid: show seek bar
         seekRow.style.display = 'flex';
         const current = serverOffset + (v.currentTime || 0);
-        const total = totalDuration || (serverOffset + (v.duration || 0));
+        const streamEnd = serverOffset + (v.duration || 0);
+        const total = Math.max(totalDuration, streamEnd);
 
         document.getElementById('timeCurrent').textContent = fmt(current);
         document.getElementById('timeTotal').textContent = fmt(total);
@@ -746,18 +833,36 @@
       }
     }
 
+    // Hover tooltip on seek bar
+    const seekTooltip = document.getElementById('seekTooltip');
+    document.getElementById('seekWrap').addEventListener('mousemove', (e) => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      if (isLive && !liveRecording) {
+        seekTooltip.textContent = fmt(pct * (video.duration || 0));
+      } else {
+        const total = totalDuration || (serverOffset + (video.duration || 0));
+        seekTooltip.textContent = fmt(pct * total);
+      }
+      seekTooltip.style.left = (pct * 100) + '%';
+    });
+
     // Click on seek bar to jump to position
     document.getElementById('seekWrap').addEventListener('click', (e) => {
       const rect = e.currentTarget.getBoundingClientRect();
       const pct = (e.clientX - rect.left) / rect.width;
-      const total = totalDuration || (serverOffset + (video.duration || 0));
-      const target = pct * total;
 
-      // Check if target is within locally available range
-      if (video.duration && target >= serverOffset && target <= serverOffset + video.duration) {
-        video.currentTime = target - serverOffset;
+      if (isLive && !liveRecording) {
+        // Live: seek within the stream buffer directly
+        video.currentTime = pct * (video.duration || 0);
       } else {
-        serverSeek(target);
+        const total = totalDuration || (serverOffset + (video.duration || 0));
+        const target = pct * total;
+        if (video.duration && target >= serverOffset && target <= serverOffset + video.duration) {
+          video.currentTime = target - serverOffset;
+        } else {
+          serverSeek(target);
+        }
       }
     });
 

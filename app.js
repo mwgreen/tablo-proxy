@@ -44,6 +44,7 @@ async function main() {
   console.log('[app] Fetching guide data...');
   await fetchGuide(GUIDE_DAYS);
 
+  console.log('[app] Encoder: h264_videotoolbox (GPU) via FFmpeg');
   await startServer(PORT);
 }
 
