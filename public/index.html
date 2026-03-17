@@ -777,6 +777,7 @@
     // Update seek bar and time display
     const video = document.getElementById('video');
     video.addEventListener('timeupdate', updateControls);
+    setInterval(updateControls, 1000);  // also update while paused (live buffer grows)
     video.addEventListener('play', () => { document.getElementById('playpause').innerHTML = '&#9208;'; });
     video.addEventListener('pause', () => { document.getElementById('playpause').innerHTML = '&#9654;'; });
 
