@@ -101,13 +101,21 @@ func resolveURI(_ uri: String, baseURL: URL) -> URL {
     return baseURL.deletingLastPathComponent().appendingPathComponent(uri)
 }
 
+// URLSession with a 10-second timeout for segment downloads
+let segmentSession: URLSession = {
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = 10
+    config.timeoutIntervalForResource = 15
+    return URLSession(configuration: config)
+}()
+
 func downloadSegmentData(baseURL: URL, segment: HLSSegmentInfo) async throws -> Data {
     let segURL = resolveURI(segment.uri, baseURL: baseURL)
     var request = URLRequest(url: segURL)
     if let length = segment.byteRangeLength, let offset = segment.byteRangeOffset {
         request.setValue("bytes=\(offset)-\(offset + length - 1)", forHTTPHeaderField: "Range")
     }
-    let (data, _) = try await URLSession.shared.data(for: request)
+    let (data, _) = try await segmentSession.data(for: request)
     return data
 }
 
@@ -487,7 +495,8 @@ if isLive {
         // Process all segments we haven't seen yet
         var segIndex = 0
         var batchProcessed = 0
-        while segIndex < totalSegs {
+        var hitLiveEdge = false
+        while segIndex < totalSegs && !hitLiveEdge {
             let batchEnd = min(segIndex + batchSize, totalSegs)
             var downloadTasks: [(index: Int, task: Task<Data?, Error>)] = []
             for i in segIndex..<batchEnd {
@@ -496,11 +505,22 @@ if isLive {
                 if knownKeys.contains(key) { continue }
                 knownKeys.insert(key)
                 let baseURL = mediaPlaylistURL
-                downloadTasks.append((i, Task { try await downloadSegmentData(baseURL: baseURL, segment: seg) }))
+                downloadTasks.append((i, Task { try? await downloadSegmentData(baseURL: baseURL, segment: seg) }))
             }
 
-            for (_, task) in downloadTasks {
-                guard let data = try await task.value else { continue }
+            for (idx, task) in downloadTasks {
+                guard let data = try await task.value else {
+                    // Download failed (timeout) — likely at the live edge of an in-progress recording
+                    if !playlistFinished {
+                        fputs("\n[gpu] Segment \(idx) download failed (live edge), will re-poll\n", stderr)
+                        // Remove from knownKeys so it gets retried on next poll
+                        let seg = recSegments[idx]
+                        knownKeys.remove("\(seg.uri):\(seg.byteRangeOffset ?? 0):\(seg.byteRangeLength ?? 0)")
+                        hitLiveEdge = true
+                        break
+                    }
+                    continue
+                }
                 demuxer2.demux(data: data)
                 processed += 1
                 batchProcessed += 1
