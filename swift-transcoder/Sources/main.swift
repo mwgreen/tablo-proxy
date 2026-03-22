@@ -35,7 +35,16 @@ struct HLSSegmentInfo {
     let byteRangeOffset: Int?
 }
 
+struct PlaylistResult {
+    let segments: [HLSSegmentInfo]
+    let isFinished: Bool  // true if playlist contains #EXT-X-ENDLIST
+}
+
 func parseMediaPlaylist(data: Data) -> [HLSSegmentInfo] {
+    return parseMediaPlaylistFull(data: data).segments
+}
+
+func parseMediaPlaylistFull(data: Data) -> PlaylistResult {
     let text = String(data: data, encoding: .utf8) ?? ""
     let lines = text.components(separatedBy: "\n")
     var segments: [HLSSegmentInfo] = []
@@ -43,10 +52,13 @@ func parseMediaPlaylist(data: Data) -> [HLSSegmentInfo] {
     var nextByteLength: Int? = nil
     var nextByteOffset: Int? = nil
     var runningOffset = 0
+    var isFinished = false
 
     for line in lines {
         let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.hasPrefix("#EXTINF:") {
+        if t == "#EXT-X-ENDLIST" {
+            isFinished = true
+        } else if t.hasPrefix("#EXTINF:") {
             nextDuration = Double(t.dropFirst(8).components(separatedBy: ",").first ?? "0") ?? 0
         } else if t.hasPrefix("#EXT-X-BYTERANGE:") {
             let parts = t.dropFirst(17).components(separatedBy: "@")
@@ -60,7 +72,7 @@ func parseMediaPlaylist(data: Data) -> [HLSSegmentInfo] {
             nextDuration = 0; nextByteLength = nil; nextByteOffset = nil
         }
     }
-    return segments
+    return PlaylistResult(segments: segments, isFinished: isFinished)
 }
 
 func resolveMediaPlaylistURL(masterURL: URL) async throws -> URL {
@@ -454,63 +466,77 @@ if isLive {
         try await Task.sleep(nanoseconds: 250_000_000)
     }
 } else {
-    // Recording: download and transcode everything as fast as possible
-    // Re-fetch playlist to get all segments (it may have grown)
-    let (plData, _) = try await URLSession.shared.data(from: mediaPlaylistURL)
-    let recSegments = parseMediaPlaylist(data: plData)
-    fputs("[gpu] Recording: \(recSegments.count) total segments to process\n", stderr)
-
-    // Download segments in concurrent batches for speed, then demux+drain sequentially.
-    // Flush audio every few segments to keep writer interleaved.
+    // Recording: download and transcode everything as fast as possible.
+    // If the playlist lacks #EXT-X-ENDLIST, the recording is still in progress —
+    // re-poll for new segments until the playlist is finalized.
     let batchSize = 16  // concurrent downloads per batch
     let flushInterval = 4  // flush audio/video every N segments
     var processed = 0
-    var segIndex = 0
-    let totalSegs = recSegments.count
     let startTime = Date()
+    var playlistFinished = false
 
-    while segIndex < totalSegs {
-        // Download a batch of segments concurrently
-        let batchEnd = min(segIndex + batchSize, totalSegs)
-        var downloadTasks: [(index: Int, task: Task<Data?, Error>)] = []
-        for i in segIndex..<batchEnd {
-            let seg = recSegments[i]
-            let key = "\(seg.uri):\(seg.byteRangeOffset ?? 0):\(seg.byteRangeLength ?? 0)"
-            if knownKeys.contains(key) { continue }
-            knownKeys.insert(key)
-            let baseURL = mediaPlaylistURL
-            downloadTasks.append((i, Task { try await downloadSegmentData(baseURL: baseURL, segment: seg) }))
+    while !playlistFinished {
+        // Fetch (or re-fetch) the playlist
+        let (plData, _) = try await URLSession.shared.data(from: mediaPlaylistURL)
+        let result = parseMediaPlaylistFull(data: plData)
+        let recSegments = result.segments
+        playlistFinished = result.isFinished
+        let totalSegs = recSegments.count
+        fputs("[gpu] Recording: \(totalSegs) segments in playlist\(playlistFinished ? " (complete)" : " (in progress)")\n", stderr)
+
+        // Process all segments we haven't seen yet
+        var segIndex = 0
+        var batchProcessed = 0
+        while segIndex < totalSegs {
+            let batchEnd = min(segIndex + batchSize, totalSegs)
+            var downloadTasks: [(index: Int, task: Task<Data?, Error>)] = []
+            for i in segIndex..<batchEnd {
+                let seg = recSegments[i]
+                let key = "\(seg.uri):\(seg.byteRangeOffset ?? 0):\(seg.byteRangeLength ?? 0)"
+                if knownKeys.contains(key) { continue }
+                knownKeys.insert(key)
+                let baseURL = mediaPlaylistURL
+                downloadTasks.append((i, Task { try await downloadSegmentData(baseURL: baseURL, segment: seg) }))
+            }
+
+            for (_, task) in downloadTasks {
+                guard let data = try await task.value else { continue }
+                demuxer2.demux(data: data)
+                processed += 1
+                batchProcessed += 1
+
+                if processed % flushInterval == 0 {
+                    demuxer2.flush()
+                    decoder.flush()
+                    drainFrames()
+                    drainAudio()
+                }
+            }
+
+            demuxer2.flush()
+            decoder.flush()
+            drainFrames()
+            drainAudio()
+
+            segIndex = batchEnd
+
+            // Progress line
+            let elapsed = Date().timeIntervalSince(startTime)
+            let pct = Double(processed) / Double(totalSegs) * 100
+            let segsPerSec = elapsed > 0 ? Double(processed) / elapsed : 0
+            let remaining = segsPerSec > 0 ? Double(totalSegs - processed) / segsPerSec : 0
+            let outSecs = Double(segWriter.segmentIndex) * segmentDuration
+            fputs("\r[gpu] \(processed)/\(totalSegs) segs (\(String(format: "%.0f", pct))%) | \(segWriter.segmentIndex) output segs (\(String(format: "%.0f", outSecs))s) | \(String(format: "%.1f", segsPerSec)) seg/s | ETA \(String(format: "%.0f", remaining))s   ", stderr)
         }
 
-        // Process downloaded segments in order
-        for (_, task) in downloadTasks {
-            guard let data = try await task.value else { continue }
-            demuxer2.demux(data: data)
-            processed += 1
-
-            if processed % flushInterval == 0 {
-                demuxer2.flush()
-                decoder.flush()
-                drainFrames()
-                drainAudio()
+        // If recording is still in progress, wait and re-poll
+        if !playlistFinished {
+            if batchProcessed == 0 {
+                // No new segments — wait before re-polling
+                fputs("\n[gpu] Waiting for new segments...\n", stderr)
+                try await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
-
-        // Flush any remaining after each batch
-        demuxer2.flush()
-        decoder.flush()
-        drainFrames()
-        drainAudio()
-
-        segIndex = batchEnd
-
-        // Progress line
-        let elapsed = Date().timeIntervalSince(startTime)
-        let pct = Double(processed) / Double(totalSegs) * 100
-        let segsPerSec = elapsed > 0 ? Double(processed) / elapsed : 0
-        let remaining = segsPerSec > 0 ? Double(totalSegs - processed) / segsPerSec : 0
-        let outSecs = Double(segWriter.segmentIndex) * segmentDuration
-        fputs("\r[gpu] \(processed)/\(totalSegs) segs (\(String(format: "%.0f", pct))%) | \(segWriter.segmentIndex) output segs (\(String(format: "%.0f", outSecs))s) | \(String(format: "%.1f", segsPerSec)) seg/s | ETA \(String(format: "%.0f", remaining))s   ", stderr)
     }
     fputs("\n", stderr)
 

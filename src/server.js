@@ -9,15 +9,55 @@ import {
 } from './tablo.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const FFMPEG = '/opt/homebrew/bin/ffmpeg';
+const IS_LINUX = process.platform === 'linux';
+const FFMPEG = process.env.FFMPEG_PATH || (IS_LINUX ? 'ffmpeg' : '/opt/homebrew/bin/ffmpeg');
 const HLS_TRANSCODE = join(__dirname, '..', 'bin', 'hls-transcode');
-const USE_GPU = process.env.ENCODER === 'gpu';
+// Swift GPU transcoder is macOS-only; on Linux always use FFmpeg with hardware accel
+const USE_GPU = process.env.ENCODER === 'gpu' && !IS_LINUX;
 const app = express();
 const DATA_DIR = join(__dirname, '..', 'data');
 const TRANSCODE_DIR = join(DATA_DIR, 'hls');
 const FAVORITES_FILE = join(DATA_DIR, 'favorites.json');
 
+// Detect Linux hardware accel: prefer VAAPI, fall back to QSV, then software
+let linuxHwAccel = null;
+if (IS_LINUX) {
+  try {
+    // Check for VAAPI device
+    execSync('test -e /dev/dri/renderD128', { stdio: 'ignore' });
+    linuxHwAccel = 'vaapi';
+  } catch {
+    try {
+      execSync(`${FFMPEG} -hide_banner -init_hw_device qsv=hw -filter_hw_device hw -f lavfi -i nullsrc -frames:v 1 -c:v h264_qsv -f null - 2>/dev/null`, { stdio: 'ignore' });
+      linuxHwAccel = 'qsv';
+    } catch {
+      // No hardware accel available
+    }
+  }
+}
+
+function getHwAccelInputArgs() {
+  if (!IS_LINUX || !linuxHwAccel) return [];
+  if (linuxHwAccel === 'vaapi') {
+    return ['-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128', '-hwaccel_output_format', 'vaapi'];
+  }
+  if (linuxHwAccel === 'qsv') {
+    return ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'];
+  }
+  return [];
+}
+
 function getVideoEncodeArgs() {
+  if (IS_LINUX && linuxHwAccel === 'vaapi') {
+    return ['-c:v', 'h264_vaapi', '-b:v', '4M'];
+  }
+  if (IS_LINUX && linuxHwAccel === 'qsv') {
+    return ['-c:v', 'h264_qsv', '-b:v', '4M', '-profile:v', 'main', '-level', '40'];
+  }
+  if (IS_LINUX) {
+    // Software fallback
+    return ['-c:v', 'libx264', '-b:v', '4M', '-profile:v', 'main', '-level', '4.0', '-preset', 'fast'];
+  }
   return ['-c:v', 'h264_videotoolbox', '-b:v', '4M', '-profile:v', 'main', '-level', '4.0'];
 }
 
@@ -151,13 +191,17 @@ function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
     proc.on('close', (code) => console.log(`[gpu:${sessionId}] Exited with code ${code}`));
     sessions.set(sessionId, { ffmpeg: proc, dir, sourceUrl, startOffset: offset, live });
   } else {
-    // FFmpeg with h264_videotoolbox + fMP4 output
+    // FFmpeg with hardware-accelerated encode (+ decode on Linux)
+    const hwInputArgs = getHwAccelInputArgs();
+    const videoEncArgs = getVideoEncodeArgs();
     const args = [];
     if (offset > 0) args.push('-ss', String(offset));
     args.push(
+      ...hwInputArgs,
       '-i', sourceUrl,
-      ...getVideoEncodeArgs(),
-      '-pix_fmt', 'yuv420p',
+      ...videoEncArgs,
+      // VAAPI keeps frames in GPU memory — no pix_fmt conversion needed
+      ...(linuxHwAccel === 'vaapi' ? [] : ['-pix_fmt', 'yuv420p']),
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
       '-f', 'hls',
       '-hls_time', '4',
@@ -176,7 +220,8 @@ function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
     sessions.set(sessionId, { ffmpeg, dir, sourceUrl, startOffset: offset, live });
   }
 
-  console.log(`[transcode] Session ${sessionId} started (${USE_GPU ? 'GPU/Swift' : 'FFmpeg'}) → ${sourceUrl}`);
+  const encoderLabel = USE_GPU ? 'GPU/Swift' : IS_LINUX ? `FFmpeg/${linuxHwAccel || 'software'}` : 'FFmpeg/VideoToolbox';
+  console.log(`[transcode] Session ${sessionId} started (${encoderLabel}) → ${sourceUrl}`);
 }
 
 function cleanupSession(sessionId) {

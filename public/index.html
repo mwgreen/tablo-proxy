@@ -425,6 +425,18 @@
         document.getElementById('recording-list').style.display = tab === 'recordings' ? 'block' : 'none';
         document.getElementById('search').value = '';
         filterList();
+        if (tab === 'recordings') refreshRecordings();
+      }
+    }
+
+    async function refreshRecordings() {
+      try {
+        await fetch('/api/refresh', { method: 'POST' });
+        const res = await fetch('/api/recordings');
+        recordings = await res.json();
+        renderRecordings();
+      } catch (e) {
+        console.warn('Failed to refresh recordings:', e);
       }
     }
 

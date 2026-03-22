@@ -44,7 +44,9 @@ async function main() {
   console.log('[app] Fetching guide data...');
   await fetchGuide(GUIDE_DAYS);
 
-  console.log('[app] Encoder: h264_videotoolbox (GPU) via FFmpeg');
+  const enc = process.env.ENCODER || 'cpu';
+  const platform = process.platform === 'linux' ? 'Linux' : 'macOS';
+  console.log(`[app] Platform: ${platform}, Encoder: ${enc}`);
   await startServer(PORT);
 }
 
