@@ -71,8 +71,16 @@ function saveFavorites(ids) {
   writeFileSync(FAVORITES_FILE, JSON.stringify(ids));
 }
 
-// Active transcode sessions: sessionId -> { ffmpeg, dir, sourceUrl, startOffset }
+// Active transcode sessions: sessionId -> { ffmpeg, dir, sourceUrl, startOffset, cleanupTimer }
 const sessions = new Map();
+const SESSION_INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minutes of no segment/playlist requests
+
+function touchSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  if (session.cleanupTimer) clearTimeout(session.cleanupTimer);
+  session.cleanupTimer = setTimeout(() => cleanupSession(sessionId), SESSION_INACTIVITY_TIMEOUT);
+}
 
 // Serve static files
 app.use(express.static(join(__dirname, '..', 'public')));
@@ -175,7 +183,7 @@ async function startTranscode(sourceUrl, offset = 0, live = false) {
     await new Promise(r => setTimeout(r, 100));
   }
 
-  setTimeout(() => cleanupSession(sessionId), 30 * 60 * 1000);
+  touchSession(sessionId);
   return sessionId;
 }
 
@@ -200,6 +208,7 @@ function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
       ...hwInputArgs,
       '-i', sourceUrl,
       ...videoEncArgs,
+      '-r', '30',  // Clean 30fps — eliminates AirPlay 29.97/30Hz cadence mismatch
       // VAAPI keeps frames in GPU memory — no pix_fmt conversion needed
       ...(linuxHwAccel === 'vaapi' ? [] : ['-pix_fmt', 'yuv420p']),
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
@@ -227,6 +236,7 @@ function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
 function cleanupSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
+  if (session.cleanupTimer) clearTimeout(session.cleanupTimer);
   session.ffmpeg.kill('SIGKILL');
   try { rmSync(session.dir, { recursive: true, force: true }); } catch {}
   sessions.delete(sessionId);
@@ -239,6 +249,7 @@ app.get('/hls/:sessionId/{*path}', (req, res) => {
   if (!session) {
     return res.status(404).send('Session expired');
   }
+  touchSession(req.params.sessionId);
 
   const pathParam = Array.isArray(req.params.path) ? req.params.path.join('/') : req.params.path;
   const filePath = join(session.dir, pathParam);
