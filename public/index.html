@@ -143,7 +143,7 @@
     .buffering.visible { display: block; }
     .buffering .spinner { width: 48px; height: 48px; border: 4px solid rgba(255,255,255,0.3); border-top-color: #e94560; border-radius: 50%; animation: spin 0.8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .error-msg { position: absolute; color: #e94560; font-size: 14px; bottom: 100px; left: 50%; transform: translateX(-50%); white-space: nowrap; }
+    .error-msg { position: absolute; color: #e94560; font-size: 16px; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; max-width: 80%; }
 
     .sidebar-search {
       padding: 8px 12px; position: sticky; top: 0; background: #16213e; z-index: 1;
@@ -224,8 +224,11 @@
       position: absolute; top: 2px; height: calc(100% - 4px);
       background: #1e3a5f; border-radius: 3px; padding: 4px 8px;
       overflow: hidden; cursor: pointer; font-size: 12px;
-      display: flex; flex-direction: column; justify-content: center;
+      display: flex; flex-direction: row; align-items: center;
       border: 1px solid #2a4a6f;
+    }
+    .guide-prog-text {
+      flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
     }
     .guide-program:hover { background: #264d73; border-color: #3a6a9f; z-index: 1; }
     .guide-program.on-now { background: #2e1a3e; border-color: #e94560; }
@@ -239,6 +242,39 @@
       position: absolute; top: 0; bottom: 0; width: 2px; background: #e94560; z-index: 1;
       pointer-events: none;
     }
+    .btn-row button.rec-btn {
+      color: #999; font-size: 18px; padding: 4px 8px; margin-left: 4px;
+      transition: color 0.2s;
+    }
+    .btn-row button.rec-btn:hover { color: #e94560; }
+    .btn-row button.rec-btn.recording { color: #e94560; }
+    .btn-row button.rec-btn.hidden { display: none; }
+    .rec-menu {
+      position: fixed; z-index: 200; background: #16213e; border: 1px solid #444;
+      border-radius: 6px; padding: 4px 0; min-width: 180px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    }
+    .rec-menu button {
+      display: block; width: 100%; text-align: left; padding: 8px 16px;
+      background: none; border: none; color: #eee; font-size: 14px; cursor: pointer;
+    }
+    .rec-menu button:hover { background: #0f3460; }
+    .rec-menu button.danger { color: #e94560; }
+    .rec-delete-btn {
+      float: right; color: #666; font-size: 13px; cursor: pointer;
+      padding: 0 4px; line-height: 1;
+    }
+    .rec-delete-btn:hover { color: #e94560; }
+    .ch-rec-dot {
+      color: #e94560; font-size: 10px; font-weight: 700; margin-left: 6px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .guide-rec-btn {
+      flex-shrink: 0; font-size: 14px; color: #666; cursor: pointer;
+      margin-left: 4px; line-height: 1; padding: 2px;
+    }
+    .guide-rec-btn:hover { color: #e94560; }
+    .guide-rec-btn.recording { color: #e94560; }
   </style>
 </head>
 <body>
@@ -288,6 +324,7 @@
           <button onclick="seekTo(10)">+10s</button>
           <button onclick="seekTo(60)">+60s</button>
           <button class="live-btn hidden" id="liveBtn" onclick="goLive()">Live</button>
+          <button class="rec-btn hidden" id="recBtn" onclick="toggleRecord(event)" title="Record">&#9679;</button>
           <span class="spacer"></span>
           <span class="volume-group">
             <button onclick="toggleMute()" id="muteBtn" title="Mute">&#128264;</button>
@@ -336,6 +373,9 @@
     let liveRecording = null; // non-null when watching a live channel that's being recorded
     let favorites = []; // empty = show all
     let currentRecordingId = null;
+    let seriesIndex = {}; // cloudShowId -> { path, title, schedule }
+    let currentShowId = null; // cloud show ID of what's playing live
+    let tunerStatus = []; // active tuner info from device
 
     // Resume position tracking — save to localStorage every 5 seconds
     function saveResumePosition() {
@@ -362,16 +402,20 @@
 
     async function init() {
       try {
-        const [chRes, recRes, guideRes, favRes] = await Promise.all([
+        const [chRes, recRes, guideRes, favRes, seriesRes, tunerRes] = await Promise.all([
           fetch('/api/channels'),
           fetch('/api/recordings'),
           fetch('/api/guide'),
           fetch('/api/favorites'),
+          fetch('/api/series'),
+          fetch('/api/tuners'),
         ]);
         channels = await chRes.json();
         recordings = await recRes.json();
         guideData = await guideRes.json();
         favorites = await favRes.json();
+        seriesIndex = await seriesRes.json();
+        tunerStatus = await tunerRes.json();
       } catch (e) {
         showError('Failed to load data: ' + e.message);
       }
@@ -408,9 +452,10 @@
       const visible = favorites.length > 0 ? channels.filter(ch => favorites.includes(ch.id)) : channels;
       list.innerHTML = visible.map(ch => {
         const now = getCurrentAiring(ch.id);
+        const rec = isChannelRecording(ch.id);
         const search = `${ch.number} ${ch.name} ${ch.callSign}`.toLowerCase();
         return `<div class="channel-item" data-id="${ch.id}" data-search="${esc(search)}" onclick="playChannel('${esc(ch.id)}', this)">
-          <div><span class="channel-number">${esc(ch.number)}</span><span class="channel-name">${esc(ch.name)}</span></div>
+          <div><span class="channel-number">${esc(ch.number)}</span><span class="channel-name">${esc(ch.name)}</span>${rec ? '<span class="ch-rec-dot">REC</span>' : ''}</div>
           ${now ? `<div class="channel-now">${esc(now)}</div>` : ''}
         </div>`;
       }).join('');
@@ -431,7 +476,7 @@
           : rec.episode;
         const search = `${rec.title} ${rec.episode}`.toLowerCase();
         return `<div class="recording-item" data-id="${rec.id}" data-search="${esc(search)}" data-duration="${rec.duration}" onclick="playRecording('${rec.id}', ${rec.duration}, this)">
-          <div class="recording-title">${esc(rec.title)}${resumeText ? `<span style="float:right;font-size:11px;color:#e94560">${resumeText}</span>` : ''}</div>
+          <div class="recording-title">${esc(rec.title)}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span>${resumeText ? `<span style="float:right;font-size:11px;color:#e94560;margin-right:8px">${resumeText}</span>` : ''}</div>
           ${epInfo ? `<div class="recording-episode">${esc(epInfo)}</div>` : ''}
           ${meta ? `<div class="recording-meta">${esc(meta)}</div>` : ''}
         </div>`;
@@ -495,14 +540,136 @@
       }
     }
 
+    async function deleteRec(recordingId, event) {
+      event.stopPropagation();
+      const rec = recordings.find(r => String(r.id) === String(recordingId));
+      const name = rec ? `${rec.title}${rec.episode ? ' - ' + rec.episode : ''}` : 'this recording';
+      if (!confirm(`Delete ${name}?`)) return;
+      try {
+        await fetch('/api/recording/' + recordingId, { method: 'DELETE' });
+        recordings = recordings.filter(r => String(r.id) !== String(recordingId));
+        renderRecordings();
+      } catch (e) {
+        console.error('Delete failed:', e);
+      }
+    }
+
+    function isChannelRecording(channelId) {
+      return tunerStatus.some(t => t.in_use && t.recording && t.channel === '/guide/channels/' + channelId);
+    }
+
+    async function refreshTuners() {
+      try {
+        tunerStatus = await (await fetch('/api/tuners')).json();
+      } catch (e) {}
+    }
+    setInterval(refreshTuners, 30000);
+
+    function updateRecBtn() {
+      const btn = document.getElementById('recBtn');
+      if (!isLive || !currentShowId) {
+        btn.classList.add('hidden');
+        return;
+      }
+      btn.classList.remove('hidden');
+      const entry = seriesIndex[currentShowId];
+      const isRec = entry && entry.schedule !== 'none';
+      btn.classList.toggle('recording', isRec);
+      btn.title = isRec ? 'Cancel recording' : 'Record this show';
+    }
+
+    function toggleRecord(event) {
+      if (!currentShowId) return;
+      // Find the current airing datetime for single-episode option
+      const activeCh = document.querySelector('.channel-item.active');
+      let airingDatetime = null;
+      if (activeCh) {
+        const chId = activeCh.dataset.id;
+        const airings = guideData[chId] || guideData[Number(chId)] || [];
+        const now = Date.now();
+        const current = airings.find(a => {
+          const start = new Date(a.datetime).getTime();
+          return now >= start && now <= start + (a.duration || 1800) * 1000;
+        });
+        if (current) airingDatetime = current.datetime;
+      }
+      toggleRecordShow(currentShowId, event || { clientX: 200, clientY: 200, stopPropagation(){}, preventDefault(){} }, airingDatetime);
+    }
+
+    function closeRecMenu() {
+      const old = document.getElementById('recMenu');
+      if (old) old.remove();
+      document.removeEventListener('click', closeRecMenu);
+    }
+
+    function toggleRecordShow(showId, event, airingDatetime) {
+      if (event) { event.stopPropagation(); event.preventDefault(); }
+      closeRecMenu();
+
+      const entry = seriesIndex[showId];
+      const isSeriesRec = entry && entry.schedule !== 'none';
+
+      const menu = document.createElement('div');
+      menu.className = 'rec-menu';
+      menu.id = 'recMenu';
+
+      let html = '';
+      if (airingDatetime) {
+        html += `<button onclick="doRecordAction('single', '${escAttr(showId)}', '${escAttr(airingDatetime)}')">Record this episode</button>`;
+      }
+      if (isSeriesRec) {
+        html += `<button class="danger" onclick="doRecordAction('cancel-series', '${escAttr(showId)}')">Cancel series recording</button>`;
+      } else {
+        html += `<button onclick="doRecordAction('series-new', '${escAttr(showId)}')">Record new episodes</button>`;
+        html += `<button onclick="doRecordAction('series-all', '${escAttr(showId)}')">Record all episodes</button>`;
+      }
+      menu.innerHTML = html;
+
+      // Position near the click
+      menu.style.left = Math.min(event.clientX, window.innerWidth - 200) + 'px';
+      menu.style.top = Math.min(event.clientY, window.innerHeight - 150) + 'px';
+      document.body.appendChild(menu);
+      setTimeout(() => document.addEventListener('click', closeRecMenu), 0);
+    }
+
+    async function doRecordAction(action, showId, datetime) {
+      closeRecMenu();
+      const entry = seriesIndex[showId];
+      try {
+        if (action === 'single') {
+          const res = await fetch('/api/record-airing', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ showId, datetime })
+          });
+          const data = await res.json();
+          if (data.error) { showError(data.error); return; }
+        } else if (action === 'series-new' || action === 'series-all') {
+          const rule = action === 'series-new' ? 'new' : 'all';
+          await fetch('/api/record/' + encodeURIComponent(showId), { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rule })
+          });
+          if (entry) entry.schedule = rule;
+        } else if (action === 'cancel-series') {
+          await fetch('/api/record/' + encodeURIComponent(showId), { method: 'DELETE' });
+          if (entry) entry.schedule = 'none';
+        }
+        updateRecBtn();
+        if (currentTab === 'guide') renderGuide();
+      } catch (e) {
+        console.error('Record action failed:', e);
+      }
+    }
+
     async function playChannel(channelId, el) {
       clearActive();
       if (el) el.classList.add('active');
       isLive = true;
       liveRecording = null;
+      currentShowId = null;
 
-      // Check if this channel has an active recording
-      const ch = channels.find(c => c.id === channelId);
+      // Find what's on now and set currentShowId for the record button
+      const ch = channels.find(c => c.id === channelId || String(c.id) === String(channelId));
       if (ch) {
         const now = Date.now();
         liveRecording = recordings.find(r => {
@@ -511,7 +678,19 @@
           const end = start + r.duration * 1000;
           return now >= start && now <= end;
         }) || null;
+
+        // Find current airing's show ID for recording
+        const airings = guideData[ch.id] || [];
+        const currentAiring = airings.find(a => {
+          const start = new Date(a.datetime || a.start).getTime();
+          const end = start + ((a.duration || 1800) * 1000);
+          return now >= start && now <= end;
+        });
+        if (currentAiring?.show?.identifier) {
+          currentShowId = currentAiring.show.identifier;
+        }
       }
+      updateRecBtn();
 
       if (liveRecording) {
         // Play the recording stream seeked to the live edge
@@ -571,6 +750,8 @@
       el.classList.add('active');
       totalDuration = duration;
       currentRecordingId = recordingId;
+      currentShowId = null;
+      updateRecBtn();
 
       // Detect if this recording is currently in progress
       const rec = recordings.find(r => String(r.id) === String(recordingId));
@@ -624,7 +805,12 @@
       try {
         const res = await fetch(endpoint);
         const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        if (data.error) {
+          loading.classList.add('hidden');
+          loading.textContent = 'Loading stream...';
+          showError(data.error);
+          return;
+        }
 
         currentSessionId = data.sessionId;
         const playlistUrl = data.url;
@@ -1135,14 +1321,22 @@
           const epInfo = a.episode ? `S${a.episode.season?.number || '?'}E${a.episode.episodeNumber || '?'}` : '';
           const tooltip = [showTitle, epInfo, a.description].filter(Boolean).join('\n');
 
+          const showId = a.show?.identifier || '';
+          const sEntry = showId ? seriesIndex[showId] : null;
+          const isScheduled = sEntry && sEntry.schedule !== 'none';
+          const isActiveRec = isOn && isChannelRecording(ch.id);
+          const recActive = isScheduled || isActiveRec;
+          const recIcon = showId
+            ? `<span class="guide-rec-btn${recActive ? ' recording' : ''}" onclick="toggleRecordShow('${escAttr(showId)}', event, '${escAttr(a.datetime)}')" title="${isActiveRec ? 'Recording now' : isScheduled ? 'Scheduled' : 'Record'}">&#9679;</span>`
+            : '';
+
           progsHtml += `<div class="guide-program${isOn ? ' on-now' : ''}" style="left:${left}px;width:${width - 2}px" title="${escAttr(tooltip)}" onclick="playFromGuide('${ch.id}')">
-            <span class="guide-prog-title">${esc(showTitle)}</span>
-            ${epInfo ? `<span class="guide-prog-ep">${esc(epInfo)}</span>` : ''}
+            <div class="guide-prog-text"><span class="guide-prog-title">${esc(showTitle)}</span>${epInfo ? `<span class="guide-prog-ep">${esc(epInfo)}</span>` : ''}</div>${recIcon}
           </div>`;
         }
 
         rowsHtml += `<div class="guide-row">
-          <div class="guide-ch-label"><span class="channel-number">${esc(ch.number)}</span> ${esc(ch.name)}</div>
+          <div class="guide-ch-label"><span class="channel-number">${esc(ch.number)}</span> ${esc(ch.name)}${isChannelRecording(ch.id) ? ' <span class="ch-rec-dot">REC</span>' : ''}</div>
           <div class="guide-programs" style="width:${totalWidth}px">${progsHtml}
             ${showNowLine ? `<div class="guide-now-line" style="left:${nowPx}px"></div>` : ''}
           </div>

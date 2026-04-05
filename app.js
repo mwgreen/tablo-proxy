@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { login, getAccount, selectAccount } from './src/auth.js';
-import { discoverDevice, fetchChannels, fetchRecordings, fetchGuide } from './src/tablo.js';
+import { discoverDevice, fetchChannels, fetchRecordings, fetchGuide, fetchSeriesIndex } from './src/tablo.js';
 import { startServer } from './src/server.js';
 
 const PORT = process.env.PORT || 8181;
@@ -43,6 +43,9 @@ async function main() {
 
   console.log('[app] Fetching guide data...');
   await fetchGuide(GUIDE_DAYS);
+
+  console.log('[app] Fetching series index...');
+  await fetchSeriesIndex();
 
   const enc = process.env.ENCODER || 'cpu';
   const platform = process.platform === 'linux' ? 'Linux' : 'macOS';

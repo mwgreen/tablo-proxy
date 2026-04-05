@@ -6,6 +6,8 @@ import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import {
   getChannels, getRecordings, getGuideData,
   startWatch, startRecordingWatch, fetchChannels, fetchRecordings,
+  resolveChannelId, getSeriesIndex, scheduleSeries, unscheduleSeries, getScheduledSeries,
+  getTunerStatus, scheduleAiring, deleteRecording,
 } from './tablo.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -63,7 +65,20 @@ function getVideoEncodeArgs() {
 
 function loadFavorites() {
   try {
-    return JSON.parse(readFileSync(FAVORITES_FILE, 'utf8'));
+    const favs = JSON.parse(readFileSync(FAVORITES_FILE, 'utf8'));
+    // Migrate legacy cloud IDs (strings like "S20370_002_01") to numeric device IDs
+    const channels = getChannels();
+    const migrated = favs.map(id => {
+      if (typeof id === 'string' && channels.length > 0) {
+        const ch = channels.find(c => c.cloudId === id);
+        if (ch) return ch.id;
+      }
+      return id;
+    });
+    if (JSON.stringify(migrated) !== JSON.stringify(favs)) {
+      saveFavorites(migrated);
+    }
+    return migrated;
   } catch { return []; }
 }
 
@@ -90,7 +105,58 @@ app.get('/api/channels', (req, res) => res.json(getChannels()));
 app.get('/api/recordings', (req, res) => res.json(getRecordings()));
 app.get('/api/guide', (req, res) => res.json(getGuideData()));
 
+app.get('/api/tuners', async (req, res) => {
+  try {
+    res.json(await getTunerStatus());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/favorites', (req, res) => res.json(loadFavorites()));
+
+// Recording schedule
+app.get('/api/series', (req, res) => res.json(getSeriesIndex()));
+app.get('/api/scheduled', (req, res) => res.json(getScheduledSeries()));
+
+app.post('/api/record/:showId', express.json(), async (req, res) => {
+  try {
+    const rule = req.body?.rule || 'new';
+    const data = await scheduleSeries(req.params.showId, rule);
+    res.json({ ok: true, schedule: data.schedule });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/record-airing', express.json(), async (req, res) => {
+  try {
+    const { showId, datetime, schedule } = req.body;
+    if (!showId || !datetime) return res.status(400).json({ error: 'showId and datetime required' });
+    const data = await scheduleAiring(showId, datetime, schedule !== false);
+    res.json({ ok: true, schedule: data.schedule });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/record/:showId', async (req, res) => {
+  try {
+    const data = await unscheduleSeries(req.params.showId);
+    res.json({ ok: true, schedule: data.schedule });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/recording/:recordingId', async (req, res) => {
+  try {
+    await deleteRecording(req.params.recordingId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
 
 app.post('/api/favorites', express.json(), (req, res) => {
   if (!Array.isArray(req.body)) return res.status(400).json({ error: 'Expected array of channel IDs' });
@@ -115,6 +181,23 @@ app.post('/api/refresh', async (req, res) => {
 // Start transcoded HLS session for a channel
 app.get('/stream/hls/channel/:channelId', async (req, res) => {
   try {
+    // Check tuner availability before attempting watch
+    try {
+      const tuners = await getTunerStatus();
+      const free = tuners.filter(t => !t.in_use);
+      if (free.length === 0) {
+        const channels = getChannels();
+        const details = tuners.filter(t => t.in_use).map(t => {
+          const chId = t.channel?.split('/').pop();
+          const ch = channels.find(c => c.id === Number(chId));
+          const name = ch ? `${ch.number} ${ch.name}` : t.channel;
+          return t.recording ? `${name} (recording)` : `${name} (watching)`;
+        }).join(', ');
+        return res.status(409).json({ error: `All tuners busy: ${details}` });
+      }
+    } catch (e) {
+      // tuner check failed, try anyway
+    }
     const playlistUrl = await startWatch(req.params.channelId);
     const sessionId = await startTranscode(playlistUrl, 0, true);
     res.json({ url: `/hls/${sessionId}/stream.m3u8`, sessionId });
