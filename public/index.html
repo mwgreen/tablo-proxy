@@ -586,6 +586,7 @@
         recordings.length = 0;
         recordings.push(...newRecs);
         tunerStatus = await tunRes.json();
+        updateRecBtn();
         if (currentTab === 'live') renderChannels();
         if (currentTab === 'guide') renderGuide();
         if (currentTab === 'recordings') renderRecordings();
@@ -659,6 +660,7 @@
         // If the set of in-progress recordings changed, re-render so REC
         // badges appear/disappear without waiting for a manual refresh.
         if (before !== after) {
+          updateRecBtn();
           if (currentTab === 'live') renderChannels();
           if (currentTab === 'guide') renderGuide();
           // Also pull a fresh recordings list so a newly-started recording
@@ -684,9 +686,20 @@
       }
       btn.classList.remove('hidden');
       const entry = seriesIndex[currentShowId];
-      const isRec = entry && entry.schedule !== 'none';
-      btn.classList.toggle('recording', isRec);
-      btn.title = isRec ? 'Cancel recording' : 'Record this show';
+      const seriesScheduled = entry && entry.schedule !== 'none';
+      // Red = THIS airing is actually capturing right now (tuner has a
+      // recording on the active channel). Series-level schedule alone is
+      // not enough — Tablo may be skipping this airing for conflicts or
+      // dedup reasons. Reflected via tooltip instead.
+      const activeCh = document.querySelector('.channel-item.active');
+      const channelId = activeCh?.dataset.id;
+      const isCapturing = channelId ? isChannelRecording(channelId) : false;
+      btn.classList.toggle('recording', isCapturing);
+      btn.title = isCapturing
+        ? 'Recording now'
+        : seriesScheduled
+          ? 'Series scheduled — click to manage'
+          : 'Record this show';
     }
 
     function toggleRecord(event) {
