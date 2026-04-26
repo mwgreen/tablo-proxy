@@ -633,11 +633,14 @@
 
     function toggleRecord(event) {
       if (!currentShowId) return;
-      // Find the current airing datetime for single-episode option
+      // Find the current airing datetime + channel for single-episode option
       const activeCh = document.querySelector('.channel-item.active');
       let airingDatetime = null;
+      let channelIdentifier = null;
       if (activeCh) {
         const chId = activeCh.dataset.id;
+        const ch = channels.find(c => String(c.id) === String(chId));
+        if (ch) channelIdentifier = ch.cloudId || null;
         const airings = guideData[chId] || guideData[Number(chId)] || [];
         const now = Date.now();
         const current = airings.find(a => {
@@ -646,7 +649,7 @@
         });
         if (current) airingDatetime = current.datetime;
       }
-      toggleRecordShow(currentShowId, event || { clientX: 200, clientY: 200, stopPropagation(){}, preventDefault(){} }, airingDatetime);
+      toggleRecordShow(currentShowId, event || { clientX: 200, clientY: 200, stopPropagation(){}, preventDefault(){} }, airingDatetime, channelIdentifier);
     }
 
     function closeRecMenu() {
@@ -655,7 +658,7 @@
       document.removeEventListener('click', closeRecMenu);
     }
 
-    function toggleRecordShow(showId, event, airingDatetime) {
+    function toggleRecordShow(showId, event, airingDatetime, channelIdentifier) {
       if (event) { event.stopPropagation(); event.preventDefault(); }
       closeRecMenu();
 
@@ -668,7 +671,8 @@
 
       let html = '';
       if (airingDatetime) {
-        html += `<button onclick="doRecordAction('single', '${escAttr(showId)}', '${escAttr(airingDatetime)}')">Record this episode</button>`;
+        const chArg = channelIdentifier ? `'${escAttr(channelIdentifier)}'` : 'null';
+        html += `<button onclick="doRecordAction('single', '${escAttr(showId)}', '${escAttr(airingDatetime)}', ${chArg})">Record this episode</button>`;
       }
       if (isSeriesRec) {
         html += `<button class="danger" onclick="doRecordAction('cancel-series', '${escAttr(showId)}')">Cancel series recording</button>`;
@@ -685,14 +689,14 @@
       setTimeout(() => document.addEventListener('click', closeRecMenu), 0);
     }
 
-    async function doRecordAction(action, showId, datetime) {
+    async function doRecordAction(action, showId, datetime, channelIdentifier) {
       closeRecMenu();
       const entry = seriesIndex[showId];
       try {
         if (action === 'single') {
           const res = await fetch('/api/record-airing', { method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ showId, datetime })
+            body: JSON.stringify({ showId, datetime, channelIdentifier })
           });
           const data = await res.json();
           if (data.error) { showError(data.error); return; }
@@ -1413,7 +1417,7 @@
           const isActiveRec = isOn && isChannelRecording(ch.id);
           const recActive = isScheduled || isActiveRec;
           const recIcon = showId
-            ? `<span class="guide-rec-btn${recActive ? ' recording' : ''}" onclick="toggleRecordShow('${escAttr(showId)}', event, '${escAttr(a.datetime)}')" title="${isActiveRec ? 'Recording now' : isScheduled ? 'Scheduled' : 'Record'}">&#9679;</span>`
+            ? `<span class="guide-rec-btn${recActive ? ' recording' : ''}" onclick="toggleRecordShow('${escAttr(showId)}', event, '${escAttr(a.datetime)}', '${escAttr(ch.cloudId || '')}')" title="${isActiveRec ? 'Recording now' : isScheduled ? 'Scheduled' : 'Record'}">&#9679;</span>`
             : '';
 
           progsHtml += `<div class="guide-program${isOn ? ' on-now' : ''}" style="left:${left}px;width:${width - 2}px" title="${escAttr(tooltip)}" onclick="playFromGuide('${ch.id}')">

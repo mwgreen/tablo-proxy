@@ -147,9 +147,9 @@ app.post('/api/record/:showId', express.json(), async (req, res) => {
 
 app.post('/api/record-airing', express.json(), async (req, res) => {
   try {
-    const { showId, datetime, schedule } = req.body;
+    const { showId, datetime, schedule, channelIdentifier } = req.body;
     if (!showId || !datetime) return res.status(400).json({ error: 'showId and datetime required' });
-    const data = await scheduleAiring(showId, datetime, schedule !== false);
+    const data = await scheduleAiring(showId, datetime, schedule !== false, channelIdentifier || null);
     res.json({ ok: true, schedule: data.schedule });
   } catch (e) {
     res.status(400).json({ error: e.message });

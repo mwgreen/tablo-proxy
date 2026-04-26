@@ -220,8 +220,11 @@ function normalizeDatetime(dt) {
   return new Date(dt).getTime();
 }
 
-// Schedule or unschedule a single airing by finding its device path
-export async function scheduleAiring(showId, airingDatetime, schedule = true) {
+// Schedule or unschedule a single airing by finding its device path.
+// channelIdentifier is optional but disambiguates when multiple shows on
+// different channels air at the same minute (e.g., CBS news at 19:00 and
+// PBS Frontline at 19:00 — without it we may PATCH the wrong one).
+export async function scheduleAiring(showId, airingDatetime, schedule = true, channelIdentifier = null) {
   const entry = seriesIndex[showId];
   const targetTime = normalizeDatetime(airingDatetime);
 
@@ -246,16 +249,26 @@ export async function scheduleAiring(showId, airingDatetime, schedule = true) {
     }
   }
 
-  // Search all airings as fallback (sports, specials, one-off shows)
+  // Search all airings as fallback (sports, specials, one-off shows). Match
+  // by datetime AND channel — multiple shows can air on different channels
+  // at the same minute, so datetime alone picks the wrong one.
   const allPaths = await nativeDeviceRequest('GET', '/guide/airings');
+  let timeMatchOnly = null;
   for (const p of allPaths) {
     const a = await nativeDeviceRequest('GET', p);
-    if (normalizeDatetime(a.airing_details?.datetime) === targetTime) {
-      const chId = a.airing_details?.channel?.channel?.channel_identifier;
-      // Match by channel too if the show has multiple airings at same time
-      const result = await nativeDeviceRequest('PATCH', p, { scheduled: schedule });
-      return result;
+    if (normalizeDatetime(a.airing_details?.datetime) !== targetTime) continue;
+    const chId = a.airing_details?.channel?.channel?.channel_identifier;
+    if (channelIdentifier && chId !== channelIdentifier) {
+      // Remember the first time-only match in case the caller didn't supply
+      // a channel identifier or we never find an exact channel match.
+      if (!timeMatchOnly) timeMatchOnly = p;
+      continue;
     }
+    return nativeDeviceRequest('PATCH', p, { scheduled: schedule });
+  }
+
+  if (timeMatchOnly && !channelIdentifier) {
+    return nativeDeviceRequest('PATCH', timeMatchOnly, { scheduled: schedule });
   }
 
   throw new Error('Airing not found on device');
