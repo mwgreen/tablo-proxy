@@ -228,16 +228,21 @@ export async function scheduleAiring(showId, airingDatetime, schedule = true) {
   // If the show is in the series index, try the fast path first: list its
   // episodes and PATCH the matching one. Sports/specials/news often aren't
   // in /guide/series at all — for those we skip straight to the all-airings
-  // fallback below.
+  // fallback below. We also fall through if the fast path's PATCH fails
+  // (some episode paths are stale or not PATCH-able).
   if (entry) {
-    const seriesNum = entry.path.split('/').pop();
-    const episodes = await nativeDeviceRequest('GET', `/guide/series/${seriesNum}/episodes`);
-    for (const epPath of episodes) {
-      const ep = await nativeDeviceRequest('GET', epPath);
-      if (normalizeDatetime(ep.airing_details?.datetime) === targetTime) {
-        const result = await nativeDeviceRequest('PATCH', epPath, { scheduled: schedule });
-        return result;
+    try {
+      const seriesNum = entry.path.split('/').pop();
+      const episodes = await nativeDeviceRequest('GET', `/guide/series/${seriesNum}/episodes`);
+      for (const epPath of episodes) {
+        const ep = await nativeDeviceRequest('GET', epPath);
+        if (normalizeDatetime(ep.airing_details?.datetime) === targetTime) {
+          const result = await nativeDeviceRequest('PATCH', epPath, { scheduled: schedule });
+          return result;
+        }
       }
+    } catch (e) {
+      console.log(`[tablo] scheduleAiring fast path failed (${e.message}); falling back to /guide/airings scan`);
     }
   }
 
