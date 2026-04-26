@@ -613,10 +613,28 @@
 
     async function refreshTuners() {
       try {
+        const before = JSON.stringify(tunerStatus.map(t => t.recording));
         tunerStatus = await (await fetch('/api/tuners')).json();
+        const after = JSON.stringify(tunerStatus.map(t => t.recording));
+        // If the set of in-progress recordings changed, re-render so REC
+        // badges appear/disappear without waiting for a manual refresh.
+        if (before !== after) {
+          if (currentTab === 'live') renderChannels();
+          if (currentTab === 'guide') renderGuide();
+          // Also pull a fresh recordings list so a newly-started recording
+          // shows up in the recordings tab too.
+          try {
+            await fetch('/api/refresh', { method: 'POST' });
+            const r = await fetch('/api/recordings');
+            const newRecs = await r.json();
+            recordings.length = 0;
+            recordings.push(...newRecs);
+            if (currentTab === 'recordings') renderRecordings();
+          } catch {}
+        }
       } catch (e) {}
     }
-    setInterval(refreshTuners, 30000);
+    setInterval(refreshTuners, 15000);
 
     function updateRecBtn() {
       const btn = document.getElementById('recBtn');
