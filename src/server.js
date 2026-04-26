@@ -51,7 +51,18 @@ function getHwAccelInputArgs() {
 
 function getVideoEncodeArgs() {
   if (IS_LINUX && linuxHwAccel === 'vaapi') {
-    return ['-c:v', 'h264_vaapi', '-b:v', '4M'];
+    return [
+      '-c:v', 'h264_vaapi',
+      '-rc_mode', 'CQP', '-qp', '24',
+      '-profile:v', 'main', '-level', '4.0',
+      '-bf', '0',
+      // Suppress SEI insertion. The h264_vaapi AU header buffer is hardcoded
+      // at 8192 bytes; broadcast OTA sources can produce SEI payloads that
+      // exceed it (a53_cc + timing + recovery_point), causing
+      // "Access unit too large" encode failures. We can't pass CCs through
+      // an all-GPU pipeline anyway (see CC notes), so dropping SEI is free.
+      '-sei', '0',
+    ];
   }
   if (IS_LINUX && linuxHwAccel === 'qsv') {
     return ['-c:v', 'h264_qsv', '-b:v', '4M', '-profile:v', 'main', '-level', '40'];
@@ -98,7 +109,12 @@ function touchSession(sessionId) {
 }
 
 // Serve static files
-app.use(express.static(join(__dirname, '..', 'public')));
+app.use(express.static(join(__dirname, '..', 'public'), {
+  // Don't let browsers cache the SPA shell — frontend JS changes ship as
+  // updates to index.html, and a stale cached copy will silently disable
+  // any client-side fixes.
+  setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache'),
+}));
 
 // API routes
 app.get('/api/channels', (req, res) => res.json(getChannels()));
@@ -235,7 +251,7 @@ app.post('/api/seek/:sessionId', express.json(), async (req, res) => {
   // Restart transcode reusing same session ID
   const dir = join(TRANSCODE_DIR, sid);
   mkdirSync(dir, { recursive: true });
-  startTranscodeWithId(sid, dir, sourceUrl, offset, live);
+  await startTranscodeWithId(sid, dir, sourceUrl, offset, live);
 
   // Wait for first segment before returning
   const seg0Path = join(dir, 'seg0.m4s');
@@ -245,19 +261,18 @@ app.post('/api/seek/:sessionId', express.json(), async (req, res) => {
   }
 
   console.log(`[transcode] Session ${sid} seeked to ${offset}s`);
-  res.json({ url: `/hls/${sid}/stream.m3u8`, startOffset: offset });
+  // Cache-bust the playlist URL so hls.js's internal fragment cache treats
+  // the post-seek stream as a fresh source. Without this, hls.js may reuse
+  // already-loaded seg0/seg1/etc. (same URL, different content) and replay
+  // the pre-seek position.
+  res.json({ url: `/hls/${sid}/stream.m3u8?t=${Date.now()}`, startOffset: offset });
 });
 
 async function startTranscode(sourceUrl, offset = 0, live = false) {
-  // Kill all existing sessions — only one stream at a time
-  for (const [id] of sessions) {
-    cleanupSession(id);
-  }
-
   const sessionId = Math.random().toString(36).slice(2, 10);
   const dir = join(TRANSCODE_DIR, sessionId);
   mkdirSync(dir, { recursive: true });
-  startTranscodeWithId(sessionId, dir, sourceUrl, offset, live);
+  await startTranscodeWithId(sessionId, dir, sourceUrl, offset, live);
 
   // Wait for 2 segments (~8s buffer) before returning URL to client
   const seg1Path = join(dir, 'seg1.m4s');
@@ -270,7 +285,50 @@ async function startTranscode(sourceUrl, offset = 0, live = false) {
   return sessionId;
 }
 
-function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
+// Resolve a master HLS playlist to its sub-playlist URL.
+async function resolveSubPlaylist(masterUrl) {
+  const text = await (await fetch(masterUrl)).text();
+  const lines = text.split(/\r?\n/);
+  const subRel = lines.find(l => l && !l.startsWith('#'));
+  if (!subRel) throw new Error('master playlist has no sub-playlist URI');
+  return new URL(subRel, masterUrl).toString();
+}
+
+// Pre-fetch the source sub-playlist and decide how to position ffmpeg's HLS
+// demuxer for a given target offset (seconds). Tablo's HLS demuxer can't
+// reliably honor `-ss` against a live (no-ENDLIST) source — for those we
+// compute the segment index whose start matches the target and pass
+// `-live_start_index N`. For VOD (with ENDLIST) `-ss` works fine.
+async function computeSeekArgs(sourceUrl, offset) {
+  if (offset <= 0) {
+    return ['-live_start_index', '0'];
+  }
+  try {
+    const subUrl = await resolveSubPlaylist(sourceUrl);
+    const text = await (await fetch(subUrl)).text();
+    const isVod = /^#EXT-X-ENDLIST/m.test(text);
+    if (isVod) {
+      return ['-ss', String(offset)];
+    }
+    // Live: walk EXTINF tags to find segment whose start <= offset < end.
+    let segIndex = 0;   // 0-based index from start of playlist
+    let elapsed = 0;
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(/^#EXTINF:([0-9.]+)/);
+      if (!m) continue;
+      const dur = parseFloat(m[1]);
+      if (elapsed + dur > offset) break;
+      elapsed += dur;
+      segIndex++;
+    }
+    return ['-live_start_index', String(segIndex)];
+  } catch (e) {
+    console.log(`[seek] computeSeekArgs failed (${e.message}); falling back to -ss ${offset}`);
+    return ['-ss', String(offset)];
+  }
+}
+
+async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
   const outputPath = join(dir, 'stream.m3u8');
 
   if (USE_GPU) {
@@ -285,8 +343,8 @@ function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
     // FFmpeg with hardware-accelerated encode (+ decode on Linux)
     const hwInputArgs = getHwAccelInputArgs();
     const videoEncArgs = getVideoEncodeArgs();
-    const args = [];
-    if (offset > 0) args.push('-ss', String(offset));
+    const seekArgs = await computeSeekArgs(sourceUrl, offset);
+    const args = [...seekArgs];
     args.push(
       ...hwInputArgs,
       '-i', sourceUrl,
@@ -298,6 +356,10 @@ function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
       '-f', 'hls',
       '-hls_time', '4',
       '-hls_list_size', '0',
+      // EVENT playlist: append-only, full back-buffer seekable. Without this
+      // hls.js treats the playlist as a live sliding window and clamps any
+      // forward seek (other than to the live edge) back to playlist start.
+      '-hls_playlist_type', 'event',
       '-hls_flags', 'independent_segments',
       '-hls_segment_type', 'fmp4',
       '-hls_fmp4_init_filename', 'init.mp4',
@@ -349,7 +411,12 @@ app.get('/hls/:sessionId/{*path}', (req, res) => {
     res.setHeader('Content-Type', 'video/mp4');
   }
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-cache');
+  // no-store + Pragma + Expires belt-and-braces. Segment filenames are
+  // reused across sessions/seeks (seg0.m4s always restarts at the new
+  // offset), so any caching here makes the browser show pre-seek content.
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.send(readFileSync(filePath));
 });
 

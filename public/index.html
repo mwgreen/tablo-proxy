@@ -645,17 +645,37 @@
           if (data.error) { showError(data.error); return; }
         } else if (action === 'series-new' || action === 'series-all') {
           const rule = action === 'series-new' ? 'new' : 'all';
-          await fetch('/api/record/' + encodeURIComponent(showId), { method: 'POST',
+          const res = await fetch('/api/record/' + encodeURIComponent(showId), { method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ rule })
           });
+          const data = await res.json();
+          if (data.error) { showError(data.error); return; }
           if (entry) entry.schedule = rule;
         } else if (action === 'cancel-series') {
-          await fetch('/api/record/' + encodeURIComponent(showId), { method: 'DELETE' });
+          const res = await fetch('/api/record/' + encodeURIComponent(showId), { method: 'DELETE' });
+          const data = await res.json();
+          if (data.error) { showError(data.error); return; }
           if (entry) entry.schedule = 'none';
         }
         updateRecBtn();
         if (currentTab === 'guide') renderGuide();
+        // Refresh the recordings list so a newly-scheduled airing appears
+        // without the user needing to reload. Tablo takes a few seconds to
+        // actually register the schedule on its tuner, so refresh once now
+        // and again after a short delay.
+        const refreshList = async () => {
+          try {
+            await fetch('/api/refresh', { method: 'POST' });
+            const r = await fetch('/api/recordings');
+            const newRecs = await r.json();
+            recordings.length = 0;
+            recordings.push(...newRecs);
+            if (currentTab === 'recordings') renderRecordings();
+          } catch {}
+        };
+        refreshList();
+        setTimeout(refreshList, 5000);
       } catch (e) {
         console.error('Record action failed:', e);
       }
@@ -830,7 +850,18 @@
       if (hls) hls.destroy();
 
       if (Hls.isSupported()) {
-        hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60 });
+        hls = new Hls({
+          maxBufferLength: 30,
+          maxMaxBufferLength: 60,
+          // For EVENT playlists hls.js otherwise defaults to liveSyncPosition
+          // (~3 segments before the end), which makes a fresh load after a
+          // server seek start near the produced live edge instead of at the
+          // requested offset. Pinning to 0 = "play from start of this
+          // playlist" — and serverOffset translates that to the right
+          // absolute position in the recording.
+          startPosition: 0,
+          backBufferLength: Infinity,
+        });
         hls.loadSource(playlistUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -858,13 +889,15 @@
         hls.on(Hls.Events.ERROR, (event, data) => {
           console.error('[hls.js]', data.type, data.details, data.reason || '', data.err || '');
           if (data.fatal) {
-            // Try to recover from fatal errors
             if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               console.log('[hls.js] Attempting media error recovery...');
               hls.recoverMediaError();
             } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              // Preserve current position on recovery — startLoad() with no
+              // arg falls back to startPosition (0), snapping playback to
+              // the start of the playlist.
               console.log('[hls.js] Attempting network error recovery...');
-              hls.startLoad();
+              hls.startLoad(video.currentTime || 0);
             } else {
               showError('Stream error: ' + data.type + ' (' + data.details + ')');
               loading.classList.add('hidden');

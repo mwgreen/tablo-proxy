@@ -135,14 +135,17 @@ export async function fetchRecordings() {
       const ep = await deviceRequest('GET', ap);
       const series = seriesMap[ep.series_path];
       const ch = ep.airing_details?.channel?.channel;
+      // Sports events live under /recordings/sports/events/* and don't have a
+      // series_path or episode field — pull title/description from ep.event.
+      const isSport = !!ep.event;
       recordings.push({
         id: ep.object_id,
         path: ep.path,
-        title: series?.series?.title || 'Unknown',
+        title: (isSport ? ep.event?.title : series?.series?.title) || 'Unknown',
         episode: ep.episode?.title || '',
         episodeNumber: ep.episode?.number || null,
         seasonNumber: ep.episode?.season_number || null,
-        description: ep.episode?.description || series?.series?.description || '',
+        description: ep.episode?.description || ep.event?.description || series?.series?.description || '',
         date: ep.airing_details?.datetime || '',
         duration: ep.airing_details?.duration || 0,
         channel: ch ? `${ch.major}.${ch.minor} ${ch.call_sign}` : '',
@@ -220,24 +223,25 @@ function normalizeDatetime(dt) {
 // Schedule or unschedule a single airing by finding its device path
 export async function scheduleAiring(showId, airingDatetime, schedule = true) {
   const entry = seriesIndex[showId];
-  if (!entry) throw new Error(`Unknown show: ${showId}`);
-
   const targetTime = normalizeDatetime(airingDatetime);
 
-  // Get the device series path number from entry.path (e.g., "/guide/series/4022" -> "4022")
-  const seriesNum = entry.path.split('/').pop();
-  const episodes = await nativeDeviceRequest('GET', `/guide/series/${seriesNum}/episodes`);
-
-  // Find the episode matching the datetime
-  for (const epPath of episodes) {
-    const ep = await nativeDeviceRequest('GET', epPath);
-    if (normalizeDatetime(ep.airing_details?.datetime) === targetTime) {
-      const result = await nativeDeviceRequest('PATCH', epPath, { scheduled: schedule });
-      return result;
+  // If the show is in the series index, try the fast path first: list its
+  // episodes and PATCH the matching one. Sports/specials/news often aren't
+  // in /guide/series at all — for those we skip straight to the all-airings
+  // fallback below.
+  if (entry) {
+    const seriesNum = entry.path.split('/').pop();
+    const episodes = await nativeDeviceRequest('GET', `/guide/series/${seriesNum}/episodes`);
+    for (const epPath of episodes) {
+      const ep = await nativeDeviceRequest('GET', epPath);
+      if (normalizeDatetime(ep.airing_details?.datetime) === targetTime) {
+        const result = await nativeDeviceRequest('PATCH', epPath, { scheduled: schedule });
+        return result;
+      }
     }
   }
 
-  // Not found in series episodes — search all airings as fallback (sports, specials)
+  // Search all airings as fallback (sports, specials, one-off shows)
   const allPaths = await nativeDeviceRequest('GET', '/guide/airings');
   for (const p of allPaths) {
     const a = await nativeDeviceRequest('GET', p);
@@ -418,6 +422,13 @@ export async function startRecordingWatch(recordingId) {
     platform: 'ios',
   };
 
-  const data = await deviceRequest('POST', `/recordings/series/episodes/${recordingId}/watch`, body);
+  // Recordings live under multiple device paths depending on type:
+  //   /recordings/series/episodes/{id}    — regular series/episode recordings
+  //   /recordings/sports/events/{id}      — sports event recordings
+  //   /recordings/programs/{id}           — programs / specials (movies, etc.)
+  // Look up the cached recording's path so we hit the right /watch endpoint.
+  const rec = recordings.find(r => String(r.id) === String(recordingId));
+  const basePath = rec?.path || `/recordings/series/episodes/${recordingId}`;
+  const data = await deviceRequest('POST', `${basePath}/watch`, body);
   return data.playlist_url;
 }
