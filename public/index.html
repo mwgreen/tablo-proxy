@@ -267,11 +267,12 @@
     }
     .rec-menu button:hover { background: #0f3460; }
     .rec-menu button.danger { color: #e94560; }
-    .rec-delete-btn {
+    .rec-delete-btn, .rec-stop-btn {
       float: right; color: #666; font-size: 13px; cursor: pointer;
       padding: 0 4px; line-height: 1;
     }
     .rec-delete-btn:hover { color: #e94560; }
+    .rec-stop-btn:hover { color: #e94560; }
     .ch-rec-dot {
       color: #e94560; font-size: 10px; font-weight: 700; margin-left: 6px;
       text-transform: uppercase; letter-spacing: 0.5px;
@@ -490,11 +491,18 @@
           ? `S${rec.seasonNumber}E${rec.episodeNumber}: ${rec.episode}`
           : rec.episode;
         const search = `${rec.title} ${rec.episode}`.toLowerCase();
-        const liveBadge = isInProgress(rec, now)
+        const inProgress = isInProgress(rec, now);
+        const liveBadge = inProgress
           ? '<span class="rec-live-badge" title="Recording now">REC</span>'
           : '';
+        // For in-progress recordings, show a Stop button (■) next to the X
+        // delete. Stop ends the capture but keeps the partial file; X
+        // deletes everything (including any partial).
+        const stopBtn = inProgress
+          ? `<span class="rec-stop-btn" onclick="stopRec('${rec.id}', event)" title="Stop recording (keep partial)">&#9632;</span>`
+          : '';
         return `<div class="recording-item" data-id="${rec.id}" data-search="${esc(search)}" data-duration="${rec.duration}" onclick="playRecording('${rec.id}', ${rec.duration}, this)">
-          <div class="recording-title">${liveBadge}${esc(rec.title)}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span>${resumeText ? `<span style="float:right;font-size:11px;color:#e94560;margin-right:8px">${resumeText}</span>` : ''}</div>
+          <div class="recording-title">${liveBadge}${esc(rec.title)}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span>${stopBtn}${resumeText ? `<span style="float:right;font-size:11px;color:#e94560;margin-right:8px">${resumeText}</span>` : ''}</div>
           ${epInfo ? `<div class="recording-episode">${esc(epInfo)}</div>` : ''}
           ${meta ? `<div class="recording-meta">${esc(meta)}</div>` : ''}
         </div>`;
@@ -575,6 +583,27 @@
         renderRecordings();
       } catch (e) {
         console.error('Delete failed:', e);
+      }
+    }
+
+    async function stopRec(recordingId, event) {
+      event.stopPropagation();
+      const rec = recordings.find(r => String(r.id) === String(recordingId));
+      const name = rec ? `${rec.title}${rec.episode ? ' - ' + rec.episode : ''}` : 'this recording';
+      if (!confirm(`Stop recording ${name}? (Keeps what's been recorded so far.)`)) return;
+      try {
+        const res = await fetch('/api/recording/' + recordingId + '/stop', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { showError(data.error); return; }
+        // Refresh the list so the REC badge clears
+        await fetch('/api/refresh', { method: 'POST' });
+        const r = await fetch('/api/recordings');
+        const newRecs = await r.json();
+        recordings.length = 0;
+        recordings.push(...newRecs);
+        renderRecordings();
+      } catch (e) {
+        console.error('Stop failed:', e);
       }
     }
 

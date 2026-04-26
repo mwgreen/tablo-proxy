@@ -257,8 +257,13 @@ export async function scheduleAiring(showId, airingDatetime, schedule = true) {
 }
 
 export async function deleteRecording(recordingId) {
-  const path = `/recordings/series/episodes/${recordingId}`;
   if (!deviceUrl) throw new Error('Device not discovered');
+
+  // Look up the cached recording to get its actual path. Sports events live
+  // at /recordings/sports/events/{id}; programs at /recordings/programs/{id};
+  // only series episodes are at /recordings/series/episodes/{id}.
+  const rec = recordings.find(r => String(r.id) === String(recordingId));
+  const path = rec?.path || `/recordings/series/episodes/${recordingId}`;
 
   const authHeaders = makeDeviceAuth('DELETE', path);
   const res = await fetch(`${deviceUrl}${path}`, {
@@ -275,8 +280,34 @@ export async function deleteRecording(recordingId) {
     throw new Error(`Delete recording failed: ${res.status} ${text}`);
   }
 
-  // Remove from local recordings list
   recordings = recordings.filter(r => String(r.id) !== String(recordingId));
+  return { ok: true };
+}
+
+// Stop an in-progress recording without discarding the captured portion.
+// Tablo's API exposes this as POST <recording_path>/stop, which transitions
+// video_details.state from "recording" to "finished" and frees the tuner
+// while preserving the partial file.
+export async function stopRecording(recordingId) {
+  if (!deviceUrl) throw new Error('Device not discovered');
+  const rec = recordings.find(r => String(r.id) === String(recordingId));
+  const basePath = rec?.path || `/recordings/series/episodes/${recordingId}`;
+  const path = `${basePath}/stop`;
+
+  const authHeaders = makeDeviceAuth('POST', path);
+  const res = await fetch(`${deviceUrl}${path}`, {
+    method: 'POST',
+    headers: {
+      ...authHeaders,
+      'Content-Type': 'application/json',
+      'User-Agent': 'Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)',
+    },
+  });
+
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text();
+    throw new Error(`Stop recording failed: ${res.status} ${text}`);
+  }
   return { ok: true };
 }
 

@@ -7,7 +7,7 @@ import {
   getChannels, getRecordings, getGuideData,
   startWatch, startRecordingWatch, fetchChannels, fetchRecordings,
   resolveChannelId, getSeriesIndex, scheduleSeries, unscheduleSeries, getScheduledSeries,
-  getTunerStatus, scheduleAiring, deleteRecording,
+  getTunerStatus, scheduleAiring, deleteRecording, stopRecording,
 } from './tablo.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -168,6 +168,15 @@ app.delete('/api/record/:showId', async (req, res) => {
 app.delete('/api/recording/:recordingId', async (req, res) => {
   try {
     await deleteRecording(req.params.recordingId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/recording/:recordingId/stop', async (req, res) => {
+  try {
+    await stopRecording(req.params.recordingId);
     res.json({ ok: true });
   } catch (e) {
     res.status(400).json({ error: e.message });
