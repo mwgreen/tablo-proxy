@@ -572,6 +572,26 @@
       }
     }
 
+    // Pull fresh recordings + tuner state and re-render whatever tab is
+     // visible. Used after delete / stop / record so REC badges and the
+     // channel list reflect reality without waiting for the 15s poll.
+    async function refreshAll() {
+      try {
+        await fetch('/api/refresh', { method: 'POST' });
+        const [recsRes, tunRes] = await Promise.all([
+          fetch('/api/recordings'),
+          fetch('/api/tuners'),
+        ]);
+        const newRecs = await recsRes.json();
+        recordings.length = 0;
+        recordings.push(...newRecs);
+        tunerStatus = await tunRes.json();
+        if (currentTab === 'live') renderChannels();
+        if (currentTab === 'guide') renderGuide();
+        if (currentTab === 'recordings') renderRecordings();
+      } catch (e) {}
+    }
+
     async function deleteRec(recordingId, event) {
       event.stopPropagation();
       const rec = recordings.find(r => String(r.id) === String(recordingId));
@@ -579,8 +599,7 @@
       if (!confirm(`Delete ${name}?`)) return;
       try {
         await fetch('/api/recording/' + recordingId, { method: 'DELETE' });
-        recordings = recordings.filter(r => String(r.id) !== String(recordingId));
-        renderRecordings();
+        await refreshAll();
       } catch (e) {
         console.error('Delete failed:', e);
       }
@@ -595,13 +614,7 @@
         const res = await fetch('/api/recording/' + recordingId + '/stop', { method: 'POST' });
         const data = await res.json();
         if (data.error) { showError(data.error); return; }
-        // Refresh the list so the REC badge clears
-        await fetch('/api/refresh', { method: 'POST' });
-        const r = await fetch('/api/recordings');
-        const newRecs = await r.json();
-        recordings.length = 0;
-        recordings.push(...newRecs);
-        renderRecordings();
+        await refreshAll();
       } catch (e) {
         console.error('Stop failed:', e);
       }
@@ -734,23 +747,11 @@
           if (entry) entry.schedule = 'none';
         }
         updateRecBtn();
-        if (currentTab === 'guide') renderGuide();
-        // Refresh the recordings list so a newly-scheduled airing appears
-        // without the user needing to reload. Tablo takes a few seconds to
-        // actually register the schedule on its tuner, so refresh once now
-        // and again after a short delay.
-        const refreshList = async () => {
-          try {
-            await fetch('/api/refresh', { method: 'POST' });
-            const r = await fetch('/api/recordings');
-            const newRecs = await r.json();
-            recordings.length = 0;
-            recordings.push(...newRecs);
-            if (currentTab === 'recordings') renderRecordings();
-          } catch {}
-        };
-        refreshList();
-        setTimeout(refreshList, 5000);
+        // Tablo takes a few seconds to register a new schedule on its tuner,
+        // so refresh once immediately and again after a short delay so the
+        // new entry / REC badge appears without the user needing to reload.
+        await refreshAll();
+        setTimeout(refreshAll, 5000);
       } catch (e) {
         console.error('Record action failed:', e);
       }
