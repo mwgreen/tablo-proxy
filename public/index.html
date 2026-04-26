@@ -592,6 +592,17 @@
       } catch (e) {}
     }
 
+    // Locally clear any tuner entries that point at the just-deleted/stopped
+     // recording. /server/tuners on the device takes a few seconds to flush
+     // after a DELETE, so without this the live-tv tab would still show a
+     // REC badge until the next refresh catches up.
+    function dropTunerForRecording(recPath) {
+      if (!recPath) return;
+      tunerStatus = tunerStatus.map(t =>
+        t.recording === recPath ? { ...t, in_use: false, recording: null, channel: null, channel_identifier: null } : t
+      );
+    }
+
     async function deleteRec(recordingId, event) {
       event.stopPropagation();
       const rec = recordings.find(r => String(r.id) === String(recordingId));
@@ -599,7 +610,17 @@
       if (!confirm(`Delete ${name}?`)) return;
       try {
         await fetch('/api/recording/' + recordingId, { method: 'DELETE' });
-        await refreshAll();
+        // Optimistic local update — drop the recording from our list and
+        // free its tuner slot. Tablo's tuner state lags the DELETE by a
+        // few seconds, so reading /api/tuners right now would still show
+        // it recording. Re-render immediately, then do a follow-up
+        // authoritative refresh once the device has caught up.
+        recordings = recordings.filter(r => String(r.id) !== String(recordingId));
+        dropTunerForRecording(rec?.path);
+        if (currentTab === 'live') renderChannels();
+        if (currentTab === 'guide') renderGuide();
+        if (currentTab === 'recordings') renderRecordings();
+        setTimeout(refreshAll, 3000);
       } catch (e) {
         console.error('Delete failed:', e);
       }
@@ -614,7 +635,13 @@
         const res = await fetch('/api/recording/' + recordingId + '/stop', { method: 'POST' });
         const data = await res.json();
         if (data.error) { showError(data.error); return; }
-        await refreshAll();
+        // Stop keeps the recording in the list (with the partial), but the
+        // tuner is freed. Drop the tuner binding optimistically.
+        dropTunerForRecording(rec?.path);
+        if (currentTab === 'live') renderChannels();
+        if (currentTab === 'guide') renderGuide();
+        if (currentTab === 'recordings') renderRecordings();
+        setTimeout(refreshAll, 3000);
       } catch (e) {
         console.error('Stop failed:', e);
       }
