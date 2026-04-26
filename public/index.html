@@ -381,6 +381,7 @@
     let liveRecording = null; // non-null when watching a live channel that's being recorded
     let favorites = []; // empty = show all
     let currentRecordingId = null;
+    let currentChannelId = null;  // numeric channel id we're playing live
     let seriesIndex = {}; // cloudShowId -> { path, title, schedule }
     let currentShowId = null; // cloud show ID of what's playing live
     let tunerStatus = []; // active tuner info from device
@@ -462,7 +463,8 @@
         const now = getCurrentAiring(ch.id);
         const rec = isChannelRecording(ch.id);
         const search = `${ch.number} ${ch.name} ${ch.callSign}`.toLowerCase();
-        return `<div class="channel-item" data-id="${ch.id}" data-search="${esc(search)}" onclick="playChannel('${esc(ch.id)}', this)">
+        const active = String(ch.id) === String(currentChannelId) ? ' active' : '';
+        return `<div class="channel-item${active}" data-id="${ch.id}" data-search="${esc(search)}" onclick="playChannel('${esc(ch.id)}', this)">
           <div><span class="channel-number">${esc(ch.number)}</span><span class="channel-name">${esc(ch.name)}</span>${rec ? '<span class="ch-rec-dot">REC</span>' : ''}</div>
           ${now ? `<div class="channel-now">${esc(now)}</div>` : ''}
         </div>`;
@@ -691,9 +693,7 @@
       // recording on the active channel). Series-level schedule alone is
       // not enough — Tablo may be skipping this airing for conflicts or
       // dedup reasons. Reflected via tooltip instead.
-      const activeCh = document.querySelector('.channel-item.active');
-      const channelId = activeCh?.dataset.id;
-      const isCapturing = channelId ? isChannelRecording(channelId) : false;
+      const isCapturing = currentChannelId != null && isChannelRecording(currentChannelId);
       btn.classList.toggle('recording', isCapturing);
       btn.title = isCapturing
         ? 'Recording now'
@@ -704,15 +704,12 @@
 
     function toggleRecord(event) {
       if (!currentShowId) return;
-      // Find the current airing datetime + channel for single-episode option
-      const activeCh = document.querySelector('.channel-item.active');
       let airingDatetime = null;
       let channelIdentifier = null;
-      if (activeCh) {
-        const chId = activeCh.dataset.id;
-        const ch = channels.find(c => String(c.id) === String(chId));
+      if (currentChannelId != null) {
+        const ch = channels.find(c => String(c.id) === String(currentChannelId));
         if (ch) channelIdentifier = ch.cloudId || null;
-        const airings = guideData[chId] || guideData[Number(chId)] || [];
+        const airings = guideData[currentChannelId] || guideData[String(currentChannelId)] || [];
         const now = Date.now();
         const current = airings.find(a => {
           const start = new Date(a.datetime).getTime();
@@ -800,6 +797,7 @@
     async function playChannel(channelId, el) {
       clearActive();
       if (el) el.classList.add('active');
+      currentChannelId = channelId;
       isLive = true;
       liveRecording = null;
       currentShowId = null;
@@ -920,6 +918,7 @@
     function clearActive() {
       saveResumePosition();
       currentRecordingId = null;
+      currentChannelId = null;
       document.querySelectorAll('.channel-item, .recording-item').forEach(el => el.classList.remove('active'));
     }
 
