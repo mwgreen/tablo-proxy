@@ -37,6 +37,13 @@
     .recording-title { font-weight: 500; }
     .recording-episode { font-size: 13px; color: #bbb; }
     .recording-meta { font-size: 12px; color: #888; margin-top: 2px; }
+    .rec-live-badge {
+      display: inline-block; font-size: 10px; font-weight: 700; color: #fff;
+      background: #e94560; padding: 1px 5px; border-radius: 3px;
+      margin-right: 6px; letter-spacing: 0.5px; vertical-align: 1px;
+      animation: rec-pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
     .player-area {
       flex: 1; display: flex; flex-direction: column; background: #000; position: relative;
@@ -463,7 +470,15 @@
 
     function renderRecordings() {
       const list = document.getElementById('recording-list');
-      list.innerHTML = recordings.map(rec => {
+      const now = Date.now();
+      // Sort in-progress recordings to the top so they're easy to find
+      const sorted = recordings.slice().sort((a, b) => {
+        const aLive = isInProgress(a, now) ? 1 : 0;
+        const bLive = isInProgress(b, now) ? 1 : 0;
+        if (aLive !== bLive) return bLive - aLive;
+        return 0;
+      });
+      list.innerHTML = sorted.map(rec => {
         const date = rec.date ? new Date(rec.date).toLocaleDateString() : '';
         const dur = rec.duration ? Math.round(rec.duration / 60) + ' min' : '';
         const resume = getResumePosition(rec.id);
@@ -475,12 +490,21 @@
           ? `S${rec.seasonNumber}E${rec.episodeNumber}: ${rec.episode}`
           : rec.episode;
         const search = `${rec.title} ${rec.episode}`.toLowerCase();
+        const liveBadge = isInProgress(rec, now)
+          ? '<span class="rec-live-badge" title="Recording now">REC</span>'
+          : '';
         return `<div class="recording-item" data-id="${rec.id}" data-search="${esc(search)}" data-duration="${rec.duration}" onclick="playRecording('${rec.id}', ${rec.duration}, this)">
-          <div class="recording-title">${esc(rec.title)}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span>${resumeText ? `<span style="float:right;font-size:11px;color:#e94560;margin-right:8px">${resumeText}</span>` : ''}</div>
+          <div class="recording-title">${liveBadge}${esc(rec.title)}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span>${resumeText ? `<span style="float:right;font-size:11px;color:#e94560;margin-right:8px">${resumeText}</span>` : ''}</div>
           ${epInfo ? `<div class="recording-episode">${esc(epInfo)}</div>` : ''}
           ${meta ? `<div class="recording-meta">${esc(meta)}</div>` : ''}
         </div>`;
       }).join('');
+    }
+
+    function isInProgress(rec, now) {
+      if (!rec.date || !rec.duration) return false;
+      const start = new Date(rec.date).getTime();
+      return now >= start && now < start + rec.duration * 1000;
     }
 
     function getCurrentAiring(channelId) {
