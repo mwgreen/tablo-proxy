@@ -350,6 +350,7 @@
       <button onclick="guideNav(-3)">&laquo; 3h</button>
       <button onclick="guideNow()">Now</button>
       <button onclick="guideNav(3)">3h &raquo;</button>
+      <button onclick="refreshGuide(this)">Refresh</button>
       <span id="guideDate"></span>
     </div>
     <div class="guide-grid" id="guideGrid"></div>
@@ -408,6 +409,17 @@
     }
     setInterval(() => { saveResumePosition(); saveWatchState(); }, 5000);
     window.addEventListener('beforeunload', () => { saveResumePosition(); saveWatchState(); });
+
+    // Keep the server-side transcode session alive while a stream is loaded
+    // (paused or playing). Without this, a paused player stops requesting
+    // segments, the server's 5-min inactivity timer fires, ffmpeg is killed
+    // and the segment dir is rm -rf'd — so resume plays only the in-memory
+    // MSE buffer (~30-90s) before 404'ing.
+    setInterval(() => {
+      if (currentSessionId) {
+        fetch(`/hls/${currentSessionId}/stream.m3u8`, { method: 'HEAD' }).catch(() => {});
+      }
+    }, 60000);
 
     async function init() {
       try {
@@ -922,6 +934,27 @@
       document.querySelectorAll('.channel-item, .recording-item').forEach(el => el.classList.remove('active'));
     }
 
+    // Re-open the current stream after the server-side session expired.
+    // Position is preserved via serverOffset + video.currentTime (the
+    // absolute offset within the recording / channel timeline).
+    let recovering = false;
+    async function recoverExpiredSession() {
+      if (recovering) return;
+      recovering = true;
+      try {
+        const v = document.getElementById('video');
+        const pos = serverOffset + (v.currentTime || 0);
+        console.log('[hls.js] Server session expired — re-opening at', pos);
+        if (currentRecordingId) {
+          await playRecordingAtOffset(currentRecordingId, pos);
+        } else if (currentChannelId) {
+          await playHls(`/stream/hls/channel/${currentChannelId}`);
+        }
+      } finally {
+        setTimeout(() => { recovering = false; }, 3000);
+      }
+    }
+
     async function playHls(endpoint) {
       const video = document.getElementById('video');
       const status = document.getElementById('status');
@@ -1008,6 +1041,15 @@
               console.log('[hls.js] Attempting media error recovery...');
               hls.recoverMediaError();
             } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              // 404 on playlist/fragment means the server-side session was
+              // cleaned up (keepalive failed — e.g. laptop slept past the
+              // inactivity window, or the server restarted). Re-open the
+              // stream at the current playback position.
+              const status = data.response?.code || data.networkDetails?.status;
+              if (status === 404 && (currentRecordingId || currentChannelId)) {
+                recoverExpiredSession();
+                return;
+              }
               // Preserve current position on recovery — startLoad() with no
               // arg falls back to startPosition (0), snapping playback to
               // the start of the playlist.
@@ -1507,6 +1549,24 @@
       if (!guideWindowStart) guideNow();
       guideWindowStart = new Date(guideWindowStart.getTime() + hours * 3600000);
       renderGuide();
+    }
+
+    async function refreshGuide(btn) {
+      const orig = btn.textContent;
+      btn.textContent = 'Refreshing...';
+      btn.disabled = true;
+      try {
+        await fetch('/api/refresh?guide=1', { method: 'POST' });
+        const [gRes, sRes] = await Promise.all([fetch('/api/guide'), fetch('/api/series')]);
+        guideData = await gRes.json();
+        seriesIndex = await sRes.json();
+        renderGuide();
+      } catch (e) {
+        console.warn('Guide refresh failed:', e);
+      } finally {
+        btn.textContent = orig;
+        btn.disabled = false;
+      }
     }
 
     function playFromGuide(channelId) {

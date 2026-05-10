@@ -47,6 +47,15 @@ async function main() {
   console.log('[app] Fetching series index...');
   await fetchSeriesIndex();
 
+  setInterval(async () => {
+    try {
+      await fetchGuide(GUIDE_DAYS);
+      await fetchSeriesIndex();
+    } catch (e) {
+      console.warn('[app] Periodic guide refresh failed:', e.message);
+    }
+  }, 6 * 60 * 60 * 1000);
+
   const enc = process.env.ENCODER || 'cpu';
   const platform = process.platform === 'linux' ? 'Linux' : 'macOS';
   console.log(`[app] Platform: ${platform}, Encoder: ${enc}`);

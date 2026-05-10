@@ -5,7 +5,7 @@ import { dirname, join } from 'path';
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import {
   getChannels, getRecordings, getGuideData,
-  startWatch, startRecordingWatch, fetchChannels, fetchRecordings,
+  startWatch, startRecordingWatch, fetchChannels, fetchRecordings, fetchGuide, fetchSeriesIndex,
   resolveChannelId, getSeriesIndex, scheduleSeries, unscheduleSeries, getScheduledSeries,
   getTunerStatus, scheduleAiring, deleteRecording, stopRecording,
 } from './tablo.js';
@@ -197,6 +197,11 @@ app.post('/api/refresh', async (req, res) => {
   try {
     await fetchChannels();
     await fetchRecordings();
+    if (req.query.guide === '1') {
+      const days = parseInt(process.env.GUIDE_DAYS || '2', 10);
+      await fetchGuide(days);
+      await fetchSeriesIndex();
+    }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
