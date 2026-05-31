@@ -221,6 +221,68 @@
       border-right: 1px solid #333;
     }
     .guide-time-row .guide-ch-label { border-bottom: 1px solid #333; }
+
+    /* ---------------- Mobile / touch layout ---------------- */
+    @media (max-width: 700px) {
+      /* Use natural document scrolling instead of fixed-height flex panes */
+      html, body { height: auto; }
+      header { padding: 10px 14px; gap: 10px; }
+      header h1 { font-size: 17px; }
+      header nav { gap: 6px; }
+      header nav button { padding: 8px 12px; font-size: 13px; }
+
+      /* Stack the video above the channel/recording list */
+      .container { flex-direction: column; height: auto; }
+      .player-area {
+        flex: none; width: 100%; order: -1;   /* video on top, list below */
+        position: sticky; top: 0; z-index: 20;
+      }
+      video { flex: none; width: 100%; height: auto; aspect-ratio: 16 / 9; }
+
+      .sidebar {
+        width: 100%; min-width: 0; flex: none;
+        overflow-y: visible; border-right: none; border-top: 1px solid #333;
+      }
+      .sidebar-search { position: static; }
+
+      /* Larger touch targets in the lists */
+      .channel-item, .recording-item { padding: 14px 16px; }
+
+      /* Control bar: wrap, bigger tap targets, drop desktop-only controls */
+      .controls { padding: 8px 10px; }
+      .btn-row { flex-wrap: wrap; gap: 6px; row-gap: 8px; }
+      .btn-row button { padding: 8px 12px; font-size: 16px; }
+      .btn-row button.play-btn { font-size: 24px; }
+      .btn-row button.live-btn { margin-left: 6px; }
+      .btn-row .spacer { display: none; }
+      .volume-group { display: none; }   /* phones use hardware volume */
+      #theaterBtn { display: none; }      /* meaningless once the layout is stacked */
+
+      /* Guide stays horizontally scrollable, just tighter */
+      .guide-container { height: calc(100dvh - 52px); }
+      .guide-ch-label { width: 78px; min-width: 78px; font-size: 12px; padding: 6px; }
+    }
+
+    /* Phone held in landscape while a stream is playing -> immersive fullscreen
+       video. CSS-driven (no Fullscreen API) so it works on iOS, which blocks
+       programmatic fullscreen without a user gesture. max-height targets phones
+       (short in landscape) without catching tablets/laptops. */
+    @media (orientation: landscape) and (max-height: 500px) {
+      body.has-stream header,
+      body.has-stream .sidebar { display: none; }
+      body.has-stream .container { height: 100dvh; }
+      body.has-stream .player-area {
+        position: fixed; inset: 0; order: 0;
+        width: 100vw; height: 100dvh; z-index: 50;
+      }
+      body.has-stream video {
+        width: 100%; height: 100%; aspect-ratio: auto; object-fit: contain;
+      }
+      body.has-stream .controls {
+        position: absolute; bottom: 0; left: 0; right: 0; z-index: 60;
+        background: rgba(0,0,0,0.55);
+      }
+    }
     .guide-programs { position: relative; height: 52px; flex-shrink: 0; }
     .guide-time-row .guide-programs { height: 30px; }
     .guide-time-mark {
@@ -308,7 +370,7 @@
       <div class="status" id="status">Select a channel or recording to start watching</div>
       <div class="loading hidden" id="loading">Loading stream...</div>
       <div class="error-msg" id="error"></div>
-      <video id="video" autoplay></video>
+      <video id="video" autoplay playsinline webkit-playsinline></video>
       <div class="buffering" id="buffering"><div class="spinner"></div></div>
       <div class="controls" id="controls">
         <div class="seek-row" id="seekRow">
@@ -1016,6 +1078,7 @@
           loading.classList.add('hidden');
           loading.textContent = 'Loading stream...';
           document.getElementById('controls').classList.add('visible');
+          document.body.classList.add('has-stream');
           const lb = document.getElementById('liveBtn');
           if (isLive) {
             lb.classList.remove('hidden');
@@ -1066,6 +1129,7 @@
         video.addEventListener('loadedmetadata', () => {
           loading.classList.add('hidden');
           document.getElementById('controls').classList.add('visible');
+          document.body.classList.add('has-stream');
           video.play().catch(() => {});
         }, { once: true });
       }
@@ -1188,6 +1252,12 @@
       if (isFullscreen()) {
         (document.exitFullscreen || document.webkitExitFullscreen).call(document);
       } else {
+        // iOS Safari (iPhone) exposes only the native video fullscreen API —
+        // elements have no requestFullscreen/webkitRequestFullscreen there.
+        if (!v.requestFullscreen && !v.webkitRequestFullscreen && v.webkitEnterFullscreen) {
+          v.webkitEnterFullscreen();
+          return;
+        }
         // Try video element fullscreen first (best native macOS behavior),
         // fall back to player area
         const target = v.requestFullscreen ? v : document.querySelector('.player-area');
