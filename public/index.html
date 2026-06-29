@@ -498,7 +498,8 @@
         guideData = await guideRes.json();
         favorites = await favRes.json();
         seriesIndex = await seriesRes.json();
-        tunerStatus = await tunerRes.json();
+        const tuners = await tunerRes.json().catch(() => []);
+        tunerStatus = Array.isArray(tuners) ? tuners : [];
       } catch (e) {
         showError('Failed to load data: ' + e.message);
       }
@@ -725,13 +726,15 @@
     }
 
     function isChannelRecording(channelId) {
-      return tunerStatus.some(t => t.in_use && t.recording && t.channel === '/guide/channels/' + channelId);
+      return Array.isArray(tunerStatus) && tunerStatus.some(t => t.in_use && t.recording && t.channel === '/guide/channels/' + channelId);
     }
 
     async function refreshTuners() {
       try {
-        const before = JSON.stringify(tunerStatus.map(t => t.recording));
-        tunerStatus = await (await fetch('/api/tuners')).json();
+        const safe = Array.isArray(tunerStatus) ? tunerStatus : [];
+        const before = JSON.stringify(safe.map(t => t.recording));
+        const fresh = await (await fetch('/api/tuners')).json().catch(() => []);
+        tunerStatus = Array.isArray(fresh) ? fresh : [];
         const after = JSON.stringify(tunerStatus.map(t => t.recording));
         // If the set of in-progress recordings changed, re-render so REC
         // badges appear/disappear without waiting for a manual refresh.

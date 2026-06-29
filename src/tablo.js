@@ -1,5 +1,7 @@
-import { cloudHeaders, CLOUD_BASE, getTokens } from './auth.js';
+import { cloudHeaders, CLOUD_BASE, getTokens, getAccount } from './auth.js';
 import { makeDeviceAuth } from './crypto.js';
+
+const DEVICE_TIMEOUT_MS = 10000;
 
 let deviceUrl = null;
 let tunerCount = 2;
@@ -38,6 +40,54 @@ export async function discoverDevice(account) {
   return deviceUrl;
 }
 
+// A failed fetch() to the device means we couldn't reach the box at all (vs an
+// HTTP error, which means we reached it). fetch() rejects with a TypeError on
+// connection errors; AbortSignal.timeout() rejects with a TimeoutError.
+function isDeviceUnreachable(e) {
+  if (!e) return false;
+  if (e.name === 'AbortError' || e.name === 'TimeoutError') return true;
+  if (e instanceof TypeError) return true;
+  return /fetch failed|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|ECONNRESET|socket hang up/i.test(e.message || '');
+}
+
+let rediscoverInFlight = null;
+
+// Re-resolve the device's LAN URL from the cloud account. The Tablo's IP can
+// change on a DHCP lease renewal, leaving our cached deviceUrl pointing at a
+// dead address. This refreshes it. Concurrent callers share one lookup so a
+// burst of failing requests triggers only a single account fetch.
+async function rediscoverDevice() {
+  if (!rediscoverInFlight) {
+    rediscoverInFlight = (async () => {
+      const account = await getAccount();
+      const device = (account.devices || [])[0];
+      if (!device || !device.url) {
+        throw new Error('No device URL from account during re-discovery');
+      }
+      if (device.url !== deviceUrl) {
+        console.log(`[tablo] Device URL changed: ${deviceUrl} -> ${device.url}`);
+        deviceUrl = device.url;
+      }
+      return deviceUrl;
+    })().finally(() => { rediscoverInFlight = null; });
+  }
+  return rediscoverInFlight;
+}
+
+// Run a device fetch, transparently re-discovering the device URL and retrying
+// once if the box is unreachable (e.g. its IP moved). The thunk must build its
+// URL from the current `deviceUrl` so the retry targets the new address.
+async function withRediscover(doFetch) {
+  try {
+    return await doFetch();
+  } catch (e) {
+    if (!isDeviceUnreachable(e)) throw e;
+    console.warn(`[tablo] Device unreachable (${e.message}); re-discovering...`);
+    await rediscoverDevice();
+    return await doFetch();
+  }
+}
+
 export async function deviceRequest(method, path, body) {
   if (!deviceUrl) throw new Error('Device not discovered');
 
@@ -45,7 +95,7 @@ export async function deviceRequest(method, path, body) {
   // Sign the path WITHOUT query string; add ?lh only to the URL
   const authHeaders = makeDeviceAuth(method, path, bodyStr);
 
-  const res = await fetch(`${deviceUrl}${path}?lh`, {
+  const res = await withRediscover(() => fetch(`${deviceUrl}${path}?lh`, {
     method,
     headers: {
       ...authHeaders,
@@ -53,7 +103,8 @@ export async function deviceRequest(method, path, body) {
       'User-Agent': 'Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)',
     },
     body: bodyStr || undefined,
-  });
+    signal: AbortSignal.timeout(DEVICE_TIMEOUT_MS),
+  }));
 
   if (!res.ok) {
     const text = await res.text();
@@ -284,14 +335,15 @@ export async function deleteRecording(recordingId) {
   const path = rec?.path || `/recordings/series/episodes/${recordingId}`;
 
   const authHeaders = makeDeviceAuth('DELETE', path);
-  const res = await fetch(`${deviceUrl}${path}`, {
+  const res = await withRediscover(() => fetch(`${deviceUrl}${path}`, {
     method: 'DELETE',
     headers: {
       ...authHeaders,
       'Content-Type': 'application/json',
       'User-Agent': 'Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)',
     },
-  });
+    signal: AbortSignal.timeout(DEVICE_TIMEOUT_MS),
+  }));
 
   if (!res.ok && res.status !== 204) {
     const text = await res.text();
@@ -313,14 +365,15 @@ export async function stopRecording(recordingId) {
   const path = `${basePath}/stop`;
 
   const authHeaders = makeDeviceAuth('POST', path);
-  const res = await fetch(`${deviceUrl}${path}`, {
+  const res = await withRediscover(() => fetch(`${deviceUrl}${path}`, {
     method: 'POST',
     headers: {
       ...authHeaders,
       'Content-Type': 'application/json',
       'User-Agent': 'Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)',
     },
-  });
+    signal: AbortSignal.timeout(DEVICE_TIMEOUT_MS),
+  }));
 
   if (!res.ok && res.status !== 204) {
     const text = await res.text();
@@ -373,7 +426,7 @@ async function nativeDeviceRequest(method, path, body) {
   const bodyStr = body ? JSON.stringify(body) : '';
   const authHeaders = makeDeviceAuth(method, path, bodyStr);
 
-  const res = await fetch(`${deviceUrl}${path}`, {
+  const res = await withRediscover(() => fetch(`${deviceUrl}${path}`, {
     method,
     headers: {
       ...authHeaders,
@@ -381,7 +434,8 @@ async function nativeDeviceRequest(method, path, body) {
       'User-Agent': 'Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)',
     },
     body: bodyStr || undefined,
-  });
+    signal: AbortSignal.timeout(DEVICE_TIMEOUT_MS),
+  }));
 
   if (!res.ok) {
     const text = await res.text();
