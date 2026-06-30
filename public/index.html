@@ -1062,19 +1062,29 @@
     function loadHls(playlistUrl, video, loading) {
       if (hls) hls.destroy();
 
+      // A live channel streams a sliding-window LIVE playlist (player tracks
+      // the live edge automatically). A recording streams an append-only EVENT
+      // playlist where we start at the produced offset.
+      const liveChannel = !!currentChannelId && !currentRecordingId;
+
       if (Hls.isSupported()) {
-        hls = new Hls({
-          maxBufferLength: 30,
-          maxMaxBufferLength: 60,
-          // For EVENT playlists hls.js otherwise defaults to liveSyncPosition
-          // (~3 segments before the end), which makes a fresh load after a
-          // server seek start near the produced live edge instead of at the
-          // requested offset. Pinning to 0 = "play from start of this
-          // playlist" — and serverOffset translates that to the right
-          // absolute position in the recording.
-          startPosition: 0,
-          backBufferLength: Infinity,
-        });
+        hls = new Hls(liveChannel
+          ? {
+              // Live channel: let hls.js detect the live playlist and start at
+              // the live edge (a few segments back), tracking it as it grows.
+              maxBufferLength: 30,
+              liveSyncDurationCount: 3,
+              backBufferLength: 90,
+            }
+          : {
+              maxBufferLength: 30,
+              maxMaxBufferLength: 60,
+              // EVENT playlist: pin to 0 so a post-seek load starts at the
+              // requested offset (serverOffset maps it to the absolute
+              // position) rather than hls.js's default live-edge guess.
+              startPosition: 0,
+              backBufferLength: Infinity,
+            });
         hls.loadSource(playlistUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -1085,15 +1095,14 @@
           const lb = document.getElementById('liveBtn');
           if (isLive) {
             lb.classList.remove('hidden');
-            if (liveRecording) {
+            lb.classList.add('at-live');
+            // Live channel: hls.js already opened at the live edge — nothing to
+            // do. In-progress recording (EVENT): jump to the produced edge.
+            if (!liveChannel && liveRecording) {
               const recStart = new Date(liveRecording.date).getTime();
               const liveEdge = (Date.now() - recStart) / 1000;
-              const nearLive = liveEdge - serverOffset < 30;
-              lb.classList.toggle('at-live', nearLive);
-              if (nearLive) video.currentTime = video.duration || 0;
-            } else {
-              lb.classList.add('at-live');
-              video.currentTime = video.duration || 0;
+              if (liveEdge - serverOffset >= 30) lb.classList.remove('at-live');
+              else video.currentTime = video.duration || 0;
             }
           } else {
             lb.classList.add('hidden');
@@ -1128,10 +1137,7 @@
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS (iOS Safari). The server emits an EVENT playlist that
-        // grows from the start, so without an explicit seek the player begins
-        // at segment 0 — an old point — instead of the live edge. Jump to the
-        // live edge for live content (mirrors the hls.js branch above).
+        // Native HLS (iOS Safari).
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', () => {
           loading.classList.add('hidden');
@@ -1141,7 +1147,10 @@
           if (isLive) {
             lb.classList.remove('hidden');
             lb.classList.add('at-live');
-            seekToLiveEdge(video);
+            // Live channel: a live (sliding-window) playlist opens at the edge
+            // natively. In-progress recording uses an EVENT playlist that
+            // starts at segment 0 — seek forward to the produced live edge.
+            if (!liveChannel) seekToLiveEdge(video);
           } else {
             lb.classList.add('hidden');
           }
@@ -1243,13 +1252,10 @@
         serverSeek(liveOffset);
         return;
       }
+      // Live channel (hls.js sliding window or native): seek to the live edge.
+      // seekable.end is the edge for both engines.
       const v = document.getElementById('video');
-      if (hls) {
-        v.currentTime = v.duration || 0;
-      } else {
-        // Native HLS (iOS): no hls object — seek the element to the live edge.
-        seekToLiveEdge(v);
-      }
+      seekToLiveEdge(v);
       v.play().catch(() => {});
       // Force LIVE state immediately — don't wait for timeupdate
       document.getElementById('liveBtn').classList.add('at-live');
@@ -1371,14 +1377,18 @@
       const liveAreaEl = document.getElementById('seekLiveArea');
 
       if (isLive && !liveRecording) {
-        // Live mode with rewind buffer
+        // Live channel: DVR window. Measure against the seekable range, not
+        // v.duration (which can be Infinity for a native live stream).
         seekRow.style.display = 'flex';
         liveEdgeEl.style.display = 'none';
         liveLabelEl.style.display = 'none';
         liveAreaEl.style.display = 'none';
-        const total = v.duration || 0;
-        const current = v.currentTime || 0;
-        const lag = total - current;
+        const sk = v.seekable;
+        const winStart = sk && sk.length ? sk.start(0) : 0;
+        const winEnd = sk && sk.length ? sk.end(sk.length - 1) : (isFinite(v.duration) ? v.duration : (v.currentTime || 0));
+        const total = Math.max(0, winEnd - winStart);
+        const current = Math.max(0, (v.currentTime || 0) - winStart);
+        const lag = winEnd - (v.currentTime || 0);
 
         document.getElementById('timeCurrent').textContent = fmt(current);
         document.getElementById('timeTotal').textContent = fmt(total);
@@ -1446,8 +1456,11 @@
       const pct = (e.clientX - rect.left) / rect.width;
 
       if (isLive && !liveRecording) {
-        // Live: seek within the stream buffer directly
-        video.currentTime = pct * (video.duration || 0);
+        // Live channel: seek within the DVR window (the seekable range).
+        const sk = video.seekable;
+        const winStart = sk && sk.length ? sk.start(0) : 0;
+        const winEnd = sk && sk.length ? sk.end(sk.length - 1) : (isFinite(video.duration) ? video.duration : winStart);
+        video.currentTime = winStart + pct * Math.max(0, winEnd - winStart);
       } else {
         const total = totalDuration || (serverOffset + (video.duration || 0));
         let target = pct * total;

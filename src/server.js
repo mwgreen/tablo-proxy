@@ -313,13 +313,28 @@ async function resolveSubPlaylist(masterUrl) {
 // reliably honor `-ss` against a live (no-ENDLIST) source — for those we
 // compute the segment index whose start matches the target and pass
 // `-live_start_index N`. For VOD (with ENDLIST) `-ss` works fine.
-// Seconds of buffer to keep behind the live edge when starting a live channel
-// with no explicit offset. Small cushion for stable startup / brief rewind.
-const LIVE_EDGE_CUSHION_S = 12;
+// Segments behind the live edge to begin a live channel (ffmpeg's native
+// negative live_start_index counts from the end of the source playlist).
+// Tablo's source segments are ~1s, so this is a ~8s startup cushion.
+const LIVE_EDGE_SEGMENTS_BACK = 8;
+
+// DVR depth for live channels: number of 4s segments retained in the sliding
+// window. 90 * 4s = 6 minutes of in-player rewind.
+const LIVE_DVR_SEGMENTS = 90;
 
 async function computeSeekArgs(sourceUrl, offset, live = false) {
-  // offset > 0 with a non-live source is handled below via -ss. Everything else
-  // needs the source playlist to pick the right start segment, so fetch it.
+  if (offset <= 0) {
+    // Live channel "watch live": start near the live edge. Tablo serves a long
+    // rolling buffer (tens of minutes); a positive index 0 would begin far in
+    // the past and transcode forward at 1x, never reaching real live. ffmpeg's
+    // negative live_start_index counts segments from the END of the source
+    // playlist — deterministic and free of the race where the source playlist
+    // is still short right after a watch session starts.
+    if (live) return ['-live_start_index', String(-LIVE_EDGE_SEGMENTS_BACK)];
+    // Recording / VOD: begin at the start.
+    return ['-live_start_index', '0'];
+  }
+  // offset > 0: index into the source playlist to find the target segment.
   try {
     const subUrl = await resolveSubPlaylist(sourceUrl);
     const text = await (await fetch(subUrl)).text();
@@ -328,22 +343,6 @@ async function computeSeekArgs(sourceUrl, offset, live = false) {
     for (const line of text.split(/\r?\n/)) {
       const m = line.match(/^#EXTINF:([0-9.]+)/);
       if (m) durs.push(parseFloat(m[1]));
-    }
-
-    if (offset <= 0) {
-      // Start of a VOD asset, or a non-live source: begin at segment 0.
-      if (isVod || !live) return ['-live_start_index', '0'];
-      // Live with no explicit offset = "watch live". Tablo serves a long
-      // rolling buffer (tens of minutes); index 0 would start far in the past
-      // and transcode forward at 1x, never reaching real live. Start near the
-      // live edge instead, leaving a small cushion.
-      let idx = durs.length;
-      let acc = 0;
-      while (idx > 0 && acc < LIVE_EDGE_CUSHION_S) {
-        idx--;
-        acc += durs[idx];
-      }
-      return ['-live_start_index', String(idx)];
     }
 
     if (isVod) {
@@ -393,12 +392,23 @@ async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = fa
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
       '-f', 'hls',
       '-hls_time', '4',
-      '-hls_list_size', '0',
-      // EVENT playlist: append-only, full back-buffer seekable. Without this
-      // hls.js treats the playlist as a live sliding window and clamps any
-      // forward seek (other than to the live edge) back to playlist start.
-      '-hls_playlist_type', 'event',
-      '-hls_flags', 'independent_segments',
+      ...(live
+        // Live channel: a sliding-window LIVE playlist (finite list, segments
+        // deleted as they age out, no EXT-X-PLAYLIST-TYPE). Players — including
+        // iOS native HLS — open at the live edge and track it automatically,
+        // and can rewind within the DVR window. This is the standard live-TV
+        // primitive; an EVENT playlist would make iOS start at the beginning.
+        ? [
+            '-hls_list_size', String(LIVE_DVR_SEGMENTS),
+            '-hls_flags', 'independent_segments+delete_segments+program_date_time',
+          ]
+        // Recording (VOD or in-progress): append-only EVENT playlist with the
+        // full timeline seekable from the start.
+        : [
+            '-hls_list_size', '0',
+            '-hls_playlist_type', 'event',
+            '-hls_flags', 'independent_segments',
+          ]),
       '-hls_segment_type', 'fmp4',
       '-hls_fmp4_init_filename', 'init.mp4',
       '-hls_segment_filename', join(dir, 'seg%d.m4s'),

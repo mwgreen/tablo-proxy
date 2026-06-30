@@ -118,12 +118,16 @@ export async function fetchChannels() {
   // Fetch channel list from local device (more reliable than cloud API)
   const paths = await deviceRequest('GET', '/guide/channels');
 
-  channels = [];
+  // Build into a local list and assign at the end. Mutating the shared
+  // `channels` array across awaits would let concurrent callers (e.g. two
+  // overlapping /api/refresh requests) interleave their pushes and produce
+  // duplicate entries. Dedup by id as a final guard against device-side dups.
+  const byId = new Map();
   for (const p of paths) {
     try {
       const ch = await deviceRequest('GET', p);
       const c = ch.channel;
-      channels.push({
+      byId.set(ch.object_id, {
         id: ch.object_id,
         cloudId: c.channel_identifier || null,
         number: `${c.major}.${c.minor}`,
@@ -137,12 +141,14 @@ export async function fetchChannels() {
     }
   }
 
-  channels.sort((a, b) => {
+  const list = [...byId.values()];
+  list.sort((a, b) => {
     const [aMaj, aMin] = a.number.split('.').map(Number);
     const [bMaj, bMin] = b.number.split('.').map(Number);
     return aMaj - bMaj || aMin - bMin;
   });
 
+  channels = list;
   console.log(`[tablo] Loaded ${channels.length} OTA channels`);
   return channels;
 }
@@ -179,8 +185,10 @@ export async function fetchRecordings() {
     return recordings;
   }
 
-  // Fetch details for each episode
-  recordings = [];
+  // Fetch details for each episode. Build into a local map (deduped by id) and
+  // assign at the end, so overlapping callers can't interleave pushes into the
+  // shared array and produce duplicates.
+  const byId = new Map();
   for (const ap of airingPaths) {
     try {
       const ep = await deviceRequest('GET', ap);
@@ -189,7 +197,7 @@ export async function fetchRecordings() {
       // Sports events live under /recordings/sports/events/* and don't have a
       // series_path or episode field — pull title/description from ep.event.
       const isSport = !!ep.event;
-      recordings.push({
+      byId.set(ep.object_id, {
         id: ep.object_id,
         path: ep.path,
         title: (isSport ? ep.event?.title : series?.series?.title) || 'Unknown',
@@ -207,9 +215,11 @@ export async function fetchRecordings() {
     }
   }
 
+  const list = [...byId.values()];
   // Sort by date descending (newest first)
-  recordings.sort((a, b) => new Date(b.date) - new Date(a.date));
+  list.sort((a, b) => new Date(b.date) - new Date(a.date));
 
+  recordings = list;
   console.log(`[tablo] Loaded ${recordings.length} recordings`);
   return recordings;
 }
