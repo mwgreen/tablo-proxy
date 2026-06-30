@@ -1128,14 +1128,51 @@
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS (iOS Safari). The server emits an EVENT playlist that
+        // grows from the start, so without an explicit seek the player begins
+        // at segment 0 — an old point — instead of the live edge. Jump to the
+        // live edge for live content (mirrors the hls.js branch above).
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', () => {
           loading.classList.add('hidden');
           document.getElementById('controls').classList.add('visible');
           document.body.classList.add('has-stream');
+          const lb = document.getElementById('liveBtn');
+          if (isLive) {
+            lb.classList.remove('hidden');
+            lb.classList.add('at-live');
+            seekToLiveEdge(video);
+          } else {
+            lb.classList.add('hidden');
+          }
           video.play().catch(() => {});
         }, { once: true });
       }
+    }
+
+    // Seek a native-HLS <video> to the live edge. seekable.end is the freshest
+    // playable position; at loadedmetadata it may not be populated yet, so
+    // retry as the player learns more of the (still-growing) EVENT playlist.
+    function seekToLiveEdge(video) {
+      const go = () => {
+        try {
+          const s = video.seekable;
+          if (s && s.length) { video.currentTime = s.end(s.length - 1); return true; }
+          if (isFinite(video.duration) && video.duration > 0) { video.currentTime = video.duration; return true; }
+        } catch (e) {}
+        return false;
+      };
+      if (go()) return;
+      const onReady = () => { if (go()) cleanup(); };
+      const cleanup = () => {
+        video.removeEventListener('progress', onReady);
+        video.removeEventListener('canplay', onReady);
+        video.removeEventListener('durationchange', onReady);
+      };
+      video.addEventListener('progress', onReady);
+      video.addEventListener('canplay', onReady);
+      video.addEventListener('durationchange', onReady);
+      setTimeout(cleanup, 8000);
     }
 
     // Seek relative (skip +/- seconds)
@@ -1206,9 +1243,13 @@
         serverSeek(liveOffset);
         return;
       }
-      if (!hls) return;
       const v = document.getElementById('video');
-      v.currentTime = v.duration || 0;
+      if (hls) {
+        v.currentTime = v.duration || 0;
+      } else {
+        // Native HLS (iOS): no hls object — seek the element to the live edge.
+        seekToLiveEdge(v);
+      }
       v.play().catch(() => {});
       // Force LIVE state immediately — don't wait for timeupdate
       document.getElementById('liveBtn').classList.add('at-live');
