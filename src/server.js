@@ -472,6 +472,22 @@ app.get('/hls/:sessionId/{*path}', (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
+
+  if (ext === 'm3u8') {
+    let body = readFileSync(filePath, 'utf8');
+    // For a live channel, tell the player to OPEN near the live edge rather
+    // than at the start of the DVR window. iOS native HLS otherwise begins at
+    // the oldest segment and can only move forward through buffered data, so
+    // the Live button can never reach an unbuffered live edge. EXT-X-START with
+    // a negative TIME-OFFSET is the HLS-standard way to set the entry point.
+    if (session.live && !body.includes('#EXT-X-START')) {
+      body = body.replace(
+        /(#EXT-X-TARGETDURATION:[^\n]*\n)/,
+        `$1#EXT-X-START:TIME-OFFSET=-12,PRECISE=YES\n`,
+      );
+    }
+    return res.send(body);
+  }
   res.send(readFileSync(filePath));
 });
 
