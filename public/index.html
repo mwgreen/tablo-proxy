@@ -349,7 +349,7 @@
 </head>
 <body>
   <header>
-    <h1>Tablo TV <span style="font-size:11px;font-weight:400;color:#888;vertical-align:middle;">build 8</span></h1>
+    <h1>Tablo TV <span style="font-size:11px;font-weight:400;color:#888;vertical-align:middle;">build 9</span></h1>
     <nav>
       <button id="btn-live" class="active" onclick="showTab('live')">Live TV</button>
       <button id="btn-recordings" onclick="showTab('recordings')">Recordings</button>
@@ -1261,20 +1261,22 @@
         serverSeek(liveOffset);
         return;
       }
+      // Seek to the live edge of BUFFERED data — the only forward seek iOS
+      // native HLS honors. Seeking to the unbuffered seekable.end (or
+      // reopening) snaps to the DVR-window start. This is exactly what the
+      // working +60s skip does (it clamps to buffered.end - 0.5).
       const v = document.getElementById('video');
       document.getElementById('liveBtn').classList.add('at-live');
-      if (hls) {
-        // hls.js: seeking to the live edge works reliably.
+      const bufEnd = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : null;
+      const from = v.currentTime;
+      if (v.buffered.length) {
+        v.currentTime = v.buffered.end(v.buffered.length - 1) - 0.5;
+      } else if (hls) {
         seekToLiveEdge(v);
-        v.play().catch(() => {});
-      } else if (currentChannelId != null) {
-        // Native HLS (iOS): an in-place seek to the live edge does not hold —
-        // the player snaps back to the start of the DVR window. Reopen the
-        // channel instead; the fresh session's playlist begins at the live
-        // edge, so it starts live (the same path a page refresh takes).
-        const el = document.querySelector(`.channel-item[data-id="${currentChannelId}"]`);
-        playChannel(currentChannelId, el);
       }
+      v.play().catch(() => {});
+      dbgLive = { from: r1(from), bufEnd: r1(bufEnd), to: r1(v.currentTime) };
+      setTimeout(() => { dbgLive.after = r1(v.currentTime); }, 800);
     }
 
     let savedVolume = 1;
@@ -1747,6 +1749,28 @@
       }
       playChannel(channelId, null);
     }
+
+    // ---- Live diagnostics overlay (tap the build marker to hide/show) ----
+    let dbgLive = {};
+    function r1(n) { return n == null ? '-' : Math.round(n * 10) / 10; }
+    const dbgEl = document.createElement('div');
+    dbgEl.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:9999;font:11px/1.4 monospace;'
+      + 'background:rgba(0,0,0,.75);color:#0f0;padding:6px 8px;border-radius:4px;max-width:96vw;'
+      + 'white-space:pre;pointer-events:none;';
+    document.body.appendChild(dbgEl);
+    document.querySelector('header h1 span')?.addEventListener('click', () => {
+      dbgEl.style.display = dbgEl.style.display === 'none' ? 'block' : 'none';
+    });
+    setInterval(() => {
+      const v = document.getElementById('video');
+      const sk = v.seekable, bf = v.buffered;
+      const skS = sk.length ? r1(sk.start(0)) : '-', skE = sk.length ? r1(sk.end(sk.length - 1)) : '-';
+      const bfS = bf.length ? r1(bf.start(0)) : '-', bfE = bf.length ? r1(bf.end(bf.length - 1)) : '-';
+      dbgEl.textContent =
+        `eng=${hls ? 'hls.js' : 'native'} live=${isLive} lr=${liveRecording ? 'Y' : 'N'} sid=${currentSessionId || '-'}\n`
+        + `t=${r1(v.currentTime)} dur=${r1(v.duration)} seek=[${skS},${skE}] buf=[${bfS},${bfE}]\n`
+        + `LIVE-btn: from=${dbgLive.from ?? '-'} bufEnd=${dbgLive.bufEnd ?? '-'} to=${dbgLive.to ?? '-'} after=${dbgLive.after ?? '-'}`;
+    }, 500);
 
     init();
   </script>
