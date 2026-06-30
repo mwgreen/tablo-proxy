@@ -1147,10 +1147,10 @@
           if (isLive) {
             lb.classList.remove('hidden');
             lb.classList.add('at-live');
-            // Seek to the live edge explicitly for both live channels and
-            // in-progress recordings — iOS doesn't reliably auto-open a
-            // sliding-window live playlist at the edge, so don't trust it.
-            seekToLiveEdge(video);
+            // No seek here: the server positions the playlist start correctly
+            // (live edge for a channel, live offset for an in-progress
+            // recording), so native HLS opens live. An in-place seek on iOS
+            // tends to snap to the DVR-window start instead.
           } else {
             lb.classList.add('hidden');
           }
@@ -1251,18 +1251,28 @@
 
     function goLive() {
       if (liveRecording) {
+        // In-progress recording: restart the transcode at the live offset. The
+        // new session's playlist begins there, so it opens live on every
+        // engine (no fragile in-place seek).
         const recStart = new Date(liveRecording.date).getTime();
         const liveOffset = Math.max(0, (Date.now() - recStart) / 1000 - 5);
         serverSeek(liveOffset);
         return;
       }
-      // Live channel (hls.js sliding window or native): seek to the live edge.
-      // seekable.end is the edge for both engines.
       const v = document.getElementById('video');
-      seekToLiveEdge(v);
-      v.play().catch(() => {});
-      // Force LIVE state immediately — don't wait for timeupdate
       document.getElementById('liveBtn').classList.add('at-live');
+      if (hls) {
+        // hls.js: seeking to the live edge works reliably.
+        seekToLiveEdge(v);
+        v.play().catch(() => {});
+      } else if (currentChannelId != null) {
+        // Native HLS (iOS): an in-place seek to the live edge does not hold —
+        // the player snaps back to the start of the DVR window. Reopen the
+        // channel instead; the fresh session's playlist begins at the live
+        // edge, so it starts live (the same path a page refresh takes).
+        const el = document.querySelector(`.channel-item[data-id="${currentChannelId}"]`);
+        playChannel(currentChannelId, el);
+      }
     }
 
     let savedVolume = 1;
