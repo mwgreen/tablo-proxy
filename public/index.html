@@ -1147,10 +1147,10 @@
           if (isLive) {
             lb.classList.remove('hidden');
             lb.classList.add('at-live');
-            // Live channel: a live (sliding-window) playlist opens at the edge
-            // natively. In-progress recording uses an EVENT playlist that
-            // starts at segment 0 — seek forward to the produced live edge.
-            if (!liveChannel) seekToLiveEdge(video);
+            // Seek to the live edge explicitly for both live channels and
+            // in-progress recordings — iOS doesn't reliably auto-open a
+            // sliding-window live playlist at the edge, so don't trust it.
+            seekToLiveEdge(video);
           } else {
             lb.classList.add('hidden');
           }
@@ -1159,15 +1159,19 @@
       }
     }
 
-    // Seek a native-HLS <video> to the live edge. seekable.end is the freshest
-    // playable position; at loadedmetadata it may not be populated yet, so
-    // retry as the player learns more of the (still-growing) EVENT playlist.
+    // Seek a <video> to the live edge. We OVERSHOOT past the seekable end
+    // rather than seeking to exactly seekable.end: on Safari/iOS, seeking past
+    // the end snaps to the live edge AND triggers the player's live resync —
+    // seeking to a finite end value can instead leave iOS clamped at the
+    // buffered start (the "Live button jumps to the beginning" bug). hls.js and
+    // desktop browsers clamp the overshoot back to the seekable end. seekable
+    // may be empty right after load, so retry as it populates.
     function seekToLiveEdge(video) {
       const go = () => {
         try {
           const s = video.seekable;
-          if (s && s.length) { video.currentTime = s.end(s.length - 1); return true; }
-          if (isFinite(video.duration) && video.duration > 0) { video.currentTime = video.duration; return true; }
+          if (s && s.length) { video.currentTime = s.end(s.length - 1) + 60; return true; }
+          if (isFinite(video.duration) && video.duration > 0) { video.currentTime = video.duration + 60; return true; }
         } catch (e) {}
         return false;
       };
