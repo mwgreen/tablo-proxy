@@ -313,32 +313,55 @@ async function resolveSubPlaylist(masterUrl) {
 // reliably honor `-ss` against a live (no-ENDLIST) source — for those we
 // compute the segment index whose start matches the target and pass
 // `-live_start_index N`. For VOD (with ENDLIST) `-ss` works fine.
-async function computeSeekArgs(sourceUrl, offset) {
-  if (offset <= 0) {
-    return ['-live_start_index', '0'];
-  }
+// Seconds of buffer to keep behind the live edge when starting a live channel
+// with no explicit offset. Small cushion for stable startup / brief rewind.
+const LIVE_EDGE_CUSHION_S = 12;
+
+async function computeSeekArgs(sourceUrl, offset, live = false) {
+  // offset > 0 with a non-live source is handled below via -ss. Everything else
+  // needs the source playlist to pick the right start segment, so fetch it.
   try {
     const subUrl = await resolveSubPlaylist(sourceUrl);
     const text = await (await fetch(subUrl)).text();
     const isVod = /^#EXT-X-ENDLIST/m.test(text);
+    const durs = [];
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(/^#EXTINF:([0-9.]+)/);
+      if (m) durs.push(parseFloat(m[1]));
+    }
+
+    if (offset <= 0) {
+      // Start of a VOD asset, or a non-live source: begin at segment 0.
+      if (isVod || !live) return ['-live_start_index', '0'];
+      // Live with no explicit offset = "watch live". Tablo serves a long
+      // rolling buffer (tens of minutes); index 0 would start far in the past
+      // and transcode forward at 1x, never reaching real live. Start near the
+      // live edge instead, leaving a small cushion.
+      let idx = durs.length;
+      let acc = 0;
+      while (idx > 0 && acc < LIVE_EDGE_CUSHION_S) {
+        idx--;
+        acc += durs[idx];
+      }
+      return ['-live_start_index', String(idx)];
+    }
+
     if (isVod) {
       return ['-ss', String(offset)];
     }
-    // Live: walk EXTINF tags to find segment whose start <= offset < end.
+    // Live with explicit offset: walk EXTINF durations to find the segment
+    // whose start <= offset < end.
     let segIndex = 0;   // 0-based index from start of playlist
     let elapsed = 0;
-    for (const line of text.split(/\r?\n/)) {
-      const m = line.match(/^#EXTINF:([0-9.]+)/);
-      if (!m) continue;
-      const dur = parseFloat(m[1]);
+    for (const dur of durs) {
       if (elapsed + dur > offset) break;
       elapsed += dur;
       segIndex++;
     }
     return ['-live_start_index', String(segIndex)];
   } catch (e) {
-    console.log(`[seek] computeSeekArgs failed (${e.message}); falling back to -ss ${offset}`);
-    return ['-ss', String(offset)];
+    console.log(`[seek] computeSeekArgs failed (${e.message}); falling back`);
+    return offset > 0 ? ['-ss', String(offset)] : ['-live_start_index', '0'];
   }
 }
 
@@ -357,7 +380,8 @@ async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = fa
     // FFmpeg with hardware-accelerated encode (+ decode on Linux)
     const hwInputArgs = getHwAccelInputArgs();
     const videoEncArgs = getVideoEncodeArgs();
-    const seekArgs = await computeSeekArgs(sourceUrl, offset);
+    const seekArgs = await computeSeekArgs(sourceUrl, offset, live);
+    console.log(`[seek] session ${sessionId}: live=${live} offset=${offset} -> ${seekArgs.join(' ')}`);
     const args = [...seekArgs];
     args.push(
       ...hwInputArgs,
