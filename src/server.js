@@ -111,9 +111,16 @@ function touchSession(sessionId) {
 // Serve static files
 app.use(express.static(join(__dirname, '..', 'public'), {
   // Don't let browsers cache the SPA shell — frontend JS changes ship as
-  // updates to index.html, and a stale cached copy will silently disable
-  // any client-side fixes.
-  setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache'),
+  // updates to index.html, and a stale cached copy will silently disable any
+  // client-side fixes. no-store (not just no-cache) because iOS Safari can
+  // serve a cached page without revalidating; no-store forbids storing it.
+  etag: false,
+  lastModified: false,
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  },
 }));
 
 // API routes
