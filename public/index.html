@@ -1059,8 +1059,10 @@
       }
     }
 
-    function loadHls(playlistUrl, video, loading) {
-      if (hls) hls.destroy();
+    function loadHls(playlistUrl, _ignoredVideo, loading) {
+      // Fresh <video> element each open so iOS native HLS lands at the live
+      // edge (a reused element clings to the old position). Also destroys hls.
+      const video = freshVideo();
 
       // A live channel streams a sliding-window LIVE playlist (player tracks
       // the live edge automatically). A recording streams an append-only EVENT
@@ -1356,9 +1358,6 @@
     document.addEventListener('fullscreenchange', onFullscreenChange);
     document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 
-    // Double-click video to toggle fullscreen
-    document.getElementById('video').addEventListener('dblclick', toggleFullscreen);
-
     function fmt(s) {
       if (!isFinite(s) || s < 0) return '0:00';
       const h = Math.floor(s / 3600);
@@ -1368,19 +1367,46 @@
       return m + ':' + String(sec).padStart(2, '0');
     }
 
-    // Update seek bar and time display
-    const video = document.getElementById('video');
-    video.addEventListener('timeupdate', updateControls);
-    setInterval(updateControls, 1000);  // also update while paused (live buffer grows)
-    video.addEventListener('play', () => { document.getElementById('playpause').innerHTML = '&#9208;'; });
-    video.addEventListener('pause', () => { document.getElementById('playpause').innerHTML = '&#9654;'; });
-
-    // Buffering spinner
+    // All persistent <video> listeners, bundled so they can be re-bound when
+    // the element is recreated (see freshVideo).
     const bufSpinner = document.getElementById('buffering');
-    video.addEventListener('waiting', () => bufSpinner.classList.add('visible'));
-    video.addEventListener('playing', () => bufSpinner.classList.remove('visible'));
-    video.addEventListener('seeked', () => bufSpinner.classList.remove('visible'));
-    video.addEventListener('canplay', () => bufSpinner.classList.remove('visible'));
+    function bindVideoListeners(el) {
+      el.addEventListener('dblclick', toggleFullscreen);
+      el.addEventListener('timeupdate', updateControls);
+      el.addEventListener('play', () => { document.getElementById('playpause').innerHTML = '&#9208;'; });
+      el.addEventListener('pause', () => { document.getElementById('playpause').innerHTML = '&#9654;'; });
+      el.addEventListener('waiting', () => bufSpinner.classList.add('visible'));
+      el.addEventListener('playing', () => bufSpinner.classList.remove('visible'));
+      el.addEventListener('seeked', () => bufSpinner.classList.remove('visible'));
+      el.addEventListener('canplay', () => bufSpinner.classList.remove('visible'));
+    }
+
+    // Update seek bar and time display
+    let video = document.getElementById('video');
+    bindVideoListeners(video);
+    setInterval(updateControls, 1000);  // also update while paused (live buffer grows)
+
+    // Swap in a brand-new <video> element (re-binding listeners) and return it.
+    // iOS native HLS does NOT reset to the live edge when a <video> element is
+    // reused — it clings to the old position, which is why a channel switch or
+    // the Live button kept landing at the start of the DVR window while a full
+    // page reload always went live. Recreating the element per stream open
+    // reproduces the page-reload behavior. Also tears down any hls.js instance.
+    function freshVideo() {
+      if (hls) { hls.destroy(); hls = null; }
+      const old = document.getElementById('video');
+      const fresh = document.createElement('video');
+      fresh.id = 'video';
+      fresh.autoplay = true;
+      fresh.setAttribute('playsinline', '');
+      fresh.setAttribute('webkit-playsinline', '');
+      fresh.muted = old.muted;
+      fresh.volume = old.volume;
+      old.replaceWith(fresh);
+      bindVideoListeners(fresh);
+      video = fresh;
+      return fresh;
+    }
 
     function updateControls() {
       const v = document.getElementById('video');
