@@ -2,264 +2,464 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0c0e14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Tablo TV</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='9' fill='%23e94560'/%3E%3C/svg%3E">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a2e; color: #eee; }
-
-    header { background: #16213e; padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
-    header h1 { font-size: 20px; font-weight: 600; }
-    header nav { display: flex; gap: 8px; }
-    header nav button {
-      background: none; border: 1px solid #444; color: #ccc;
-      padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;
+    :root {
+      --bg: #0c0e14;
+      --surface: #13161f;
+      --surface-2: #1a1e2b;
+      --surface-3: #232838;
+      --border: rgba(255,255,255,0.07);
+      --text: #f2f3f7;
+      --text-dim: #9aa0b0;
+      --text-faint: #666d80;
+      --accent: #e94560;
+      --accent-soft: rgba(233,69,96,0.14);
+      --radius: 10px;
+      --header-h: 56px;
     }
-    header nav button.active { background: #0f3460; border-color: #0f3460; color: #fff; }
 
-    .container { display: flex; height: calc(100vh - 56px); }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    button { touch-action: manipulation; font-family: inherit; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background: var(--bg); color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ---------------- Header ---------------- */
+    header {
+      background: var(--surface); height: var(--header-h);
+      padding: 0 max(20px, env(safe-area-inset-left)) 0 max(20px, env(safe-area-inset-right));
+      display: flex; align-items: center; gap: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand { display: flex; align-items: baseline; gap: 8px; }
+    .brand h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; }
+    .brand h1::before {
+      content: ''; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+      background: var(--accent); margin-right: 8px; vertical-align: 1px;
+      box-shadow: 0 0 8px rgba(233,69,96,0.7);
+    }
+    .brand .build { font-size: 10px; color: var(--text-faint); font-weight: 400; }
+    header nav {
+      display: flex; gap: 2px; background: var(--surface-2);
+      padding: 3px; border-radius: 9px;
+    }
+    header nav button {
+      background: none; border: none; color: var(--text-dim);
+      padding: 6px 16px; border-radius: 7px; cursor: pointer; font-size: 13px; font-weight: 600;
+      transition: color 0.15s, background 0.15s;
+    }
+    header nav button:hover { color: var(--text); }
+    header nav button.active { background: var(--surface-3); color: var(--text); }
+
+    /* ---------------- Layout ---------------- */
+    .container { display: flex; height: calc(100vh - var(--header-h)); }
 
     .sidebar {
-      width: 320px; min-width: 320px; overflow-y: auto;
-      background: #16213e; border-right: 1px solid #333; padding: 8px 0;
+      width: 340px; min-width: 340px; overflow-y: auto;
+      background: var(--surface); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
     }
+    .sidebar-search {
+      padding: 10px 12px; position: sticky; top: 0; background: var(--surface); z-index: 5;
+      display: flex; gap: 8px; align-items: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-search input {
+      flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 14px; outline: none; min-width: 0;
+    }
+    .sidebar-search input:focus { border-color: rgba(233,69,96,0.5); }
+    .sidebar-search input::placeholder { color: var(--text-faint); }
+    .gear-btn {
+      background: none; border: none; color: var(--text-faint); font-size: 19px;
+      cursor: pointer; padding: 6px; line-height: 1; border-radius: 6px;
+    }
+    .gear-btn:hover { color: var(--text); background: var(--surface-2); }
 
+    /* ---------------- List items ---------------- */
     .channel-item, .recording-item {
-      padding: 10px 16px; cursor: pointer; border-bottom: 1px solid #222;
-      transition: background 0.15s;
+      padding: 11px 14px; cursor: pointer;
+      border-left: 3px solid transparent;
+      transition: background 0.12s;
+      position: relative;
     }
-    .channel-item:hover, .recording-item:hover { background: #1a1a3e; }
-    .channel-item.active, .recording-item.active { background: #0f3460; }
-    .channel-number { font-weight: 700; color: #e94560; margin-right: 8px; }
-    .channel-name { font-weight: 500; }
-    .channel-now { font-size: 12px; color: #999; margin-top: 2px; }
-    .recording-title { font-weight: 500; }
-    .recording-episode { font-size: 13px; color: #bbb; }
-    .recording-meta { font-size: 12px; color: #888; margin-top: 2px; }
+    .channel-item:hover, .recording-item:hover { background: var(--surface-2); }
+    .channel-item.active, .recording-item.active {
+      background: var(--accent-soft); border-left-color: var(--accent);
+    }
+    .channel-number {
+      display: inline-block; font-weight: 700; font-size: 12px; color: var(--accent);
+      background: var(--accent-soft); border-radius: 5px; padding: 2px 7px;
+      margin-right: 9px; font-variant-numeric: tabular-nums;
+    }
+    .channel-name { font-weight: 600; font-size: 14px; }
+    .channel-now { font-size: 12.5px; color: var(--text-dim); margin-top: 3px; padding-left: 2px; }
+
+    .recording-title { font-weight: 600; font-size: 14px; padding-right: 72px; }
+    .recording-episode { font-size: 13px; color: var(--text-dim); margin-top: 2px; }
+    .recording-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; }
+    .rec-actions {
+      position: absolute; top: 8px; right: 8px; display: flex; gap: 2px;
+    }
+    .rec-delete-btn, .rec-stop-btn {
+      color: var(--text-faint); font-size: 13px; cursor: pointer;
+      padding: 6px 8px; line-height: 1; border-radius: 6px;
+    }
+    .rec-delete-btn:hover, .rec-stop-btn:hover { color: var(--accent); background: var(--surface-3); }
+    .resume-bar {
+      height: 3px; background: var(--surface-3); border-radius: 2px; margin-top: 7px; overflow: hidden;
+    }
+    .resume-bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+
     .rec-live-badge {
-      display: inline-block; font-size: 10px; font-weight: 700; color: #fff;
-      background: #e94560; padding: 1px 5px; border-radius: 3px;
-      margin-right: 6px; letter-spacing: 0.5px; vertical-align: 1px;
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 10px; font-weight: 700; color: #fff;
+      background: var(--accent); padding: 2px 6px; border-radius: 4px;
+      margin-right: 7px; letter-spacing: 0.6px; vertical-align: 1px;
+    }
+    .rec-live-badge::before {
+      content: ''; width: 5px; height: 5px; border-radius: 50%; background: #fff;
       animation: rec-pulse 1.5s ease-in-out infinite;
     }
-    @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+    @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+    .ch-rec-dot {
+      color: var(--accent); font-size: 9.5px; font-weight: 800; margin-left: 7px;
+      text-transform: uppercase; letter-spacing: 0.6px;
+      animation: rec-pulse 1.5s ease-in-out infinite;
+    }
 
+    /* ---------------- Player area ---------------- */
     .player-area {
-      flex: 1; display: flex; flex-direction: column; background: #000; position: relative;
+      flex: 1; display: flex; background: #000; position: relative; min-width: 0;
     }
-    video { width: 100%; flex: 1; background: #000; }
+    video { width: 100%; flex: 1; background: #000; min-height: 0; }
 
-    .controls {
-      display: none; background: #111; padding: 8px 16px;
-      flex-direction: column; gap: 6px;
+    .status, .loading {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      color: var(--text-faint); font-size: 15px; text-align: center; z-index: 5;
+      display: flex; flex-direction: column; align-items: center; gap: 14px;
     }
-    .controls.visible { display: flex; }
+    .status svg { width: 44px; height: 44px; opacity: 0.4; }
+    .status.hidden, .loading.hidden { display: none; }
+    .loading { color: var(--text-dim); }
+    .loading .spinner, .buffering .spinner {
+      width: 42px; height: 42px; border: 3px solid rgba(255,255,255,0.15);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .buffering {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      display: none; z-index: 10; pointer-events: none;
+    }
+    .buffering.visible { display: block; }
+    .error-msg {
+      position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+      background: rgba(20,10,14,0.92); border: 1px solid rgba(233,69,96,0.4);
+      color: #ff8fa3; font-size: 13.5px; padding: 10px 16px; border-radius: 9px;
+      max-width: 85%; text-align: center; z-index: 40; display: none;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .error-msg.visible { display: block; }
 
-    .seek-row { display: flex; align-items: center; gap: 10px; }
-    .seek-bar-wrap {
-      flex: 1; height: 20px; cursor: pointer; display: flex; align-items: center;
+    /* ---------------- Player UI overlay ---------------- */
+    .player-ui {
+      position: absolute; inset: 0; z-index: 20; display: none;
+      pointer-events: none;
+      opacity: 1; transition: opacity 0.25s ease;
     }
-    .seek-bar {
-      width: 100%; height: 6px; background: #333; border-radius: 3px;
-      position: relative; overflow: visible;
+    .player-ui.visible { display: block; }
+    .player-area.hide-ui .player-ui { opacity: 0; }
+    .player-area.hide-ui { cursor: none; }
+    .player-area.hide-ui .player-top,
+    .player-area.hide-ui .player-bottom { pointer-events: none !important; }
+
+    .player-top {
+      position: absolute; top: 0; left: 0; right: 0;
+      padding: 14px max(18px, env(safe-area-inset-right)) 40px max(18px, env(safe-area-inset-left));
+      background: linear-gradient(to bottom, rgba(0,0,0,0.72), rgba(0,0,0,0));
+      pointer-events: auto;
+    }
+    .np-title { font-size: 15.5px; font-weight: 700; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+    .np-sub { font-size: 12.5px; color: rgba(255,255,255,0.75); margin-top: 2px; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+
+    .player-bottom {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      padding: 34px max(16px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+      background: linear-gradient(to top, rgba(0,0,0,0.82), rgba(0,0,0,0));
+      pointer-events: auto;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+
+    /* ---- Seek bar ---- */
+    .seek-row { display: flex; align-items: center; gap: 12px; }
+    .time-label {
+      font-size: 12.5px; color: rgba(255,255,255,0.85); font-variant-numeric: tabular-nums;
+      white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,0.8); min-width: 40px;
+    }
+    .time-label.right { text-align: right; }
+    .seek-wrap {
+      flex: 1; height: 28px; position: relative; cursor: pointer;
+      display: flex; align-items: center; touch-action: none;
+    }
+    .seek-track {
+      width: 100%; height: 4px; background: rgba(255,255,255,0.22); border-radius: 2px;
+      position: relative; overflow: hidden; transition: height 0.12s;
+    }
+    .seek-wrap:hover .seek-track, .seek-wrap.scrubbing .seek-track { height: 6px; }
+    .seek-buffered {
+      height: 100%; background: rgba(255,255,255,0.3); border-radius: 2px;
+      position: absolute; left: 0; top: 0; width: 0;
     }
     .seek-fill {
-      height: 100%; background: #e94560; border-radius: 3px; position: absolute; left: 0; top: 0;
+      height: 100%; background: var(--accent); border-radius: 2px;
+      position: absolute; left: 0; top: 0; width: 0;
     }
-    .seek-buffered {
-      height: 100%; background: #666; border-radius: 3px; position: absolute; left: 0; top: 0;
+    .seek-thumb {
+      position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%;
+      background: #fff; transform: translate(-50%, -50%) scale(0);
+      transition: transform 0.12s; pointer-events: none; z-index: 2;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.5);
     }
-    .seek-live-area {
-      height: 100%; background: #444; border-radius: 3px; position: absolute; left: 0; top: 0;
-      display: none;
-    }
-    .seek-live-edge {
-      position: absolute; top: -6px; width: 3px; height: calc(100% + 12px);
-      background: #e94560; border-radius: 1px; z-index: 3; display: none;
-      box-shadow: 0 0 4px rgba(233, 69, 96, 0.6); pointer-events: none;
-    }
-    .seek-live-label {
-      position: absolute; top: -20px; transform: translateX(-50%);
-      font-size: 10px; color: #e94560; font-weight: 700; text-transform: uppercase;
-      pointer-events: none; display: none; letter-spacing: 0.5px;
-    }
-    .seek-bar-wrap:hover .seek-bar { height: 10px; }
-    .seek-tooltip {
-      position: absolute; top: -28px; transform: translateX(-50%);
-      background: rgba(0,0,0,0.85); color: #fff; font-size: 12px;
-      padding: 3px 7px; border-radius: 3px; pointer-events: none;
+    .seek-wrap:hover .seek-thumb, .seek-wrap.scrubbing .seek-thumb { transform: translate(-50%, -50%) scale(1); }
+    .seek-bubble {
+      position: absolute; bottom: 26px; transform: translateX(-50%);
+      background: rgba(12,14,20,0.92); color: #fff; font-size: 12px; font-weight: 600;
+      padding: 4px 9px; border-radius: 6px; pointer-events: none;
       white-space: nowrap; display: none; font-variant-numeric: tabular-nums;
+      border: 1px solid rgba(255,255,255,0.12);
     }
-    .seek-bar-wrap:hover .seek-tooltip { display: block; }
-    .time-label { font-size: 13px; color: #aaa; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .seek-bubble.visible { display: block; }
 
-    .btn-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
-    .btn-row button {
-      background: none; border: none; color: #ddd; font-size: 15px;
-      cursor: pointer; padding: 4px 10px; border-radius: 4px; font-weight: 600;
-    }
-    .btn-row button:hover { background: rgba(255,255,255,0.1); }
-    .btn-row button.play-btn { font-size: 22px; padding: 4px 14px; }
-    .btn-row button.live-btn {
-      background: #555; color: #fff; font-size: 12px; padding: 3px 10px;
-      border-radius: 3px; margin-left: 12px; text-transform: uppercase; font-weight: 700;
-      letter-spacing: 0.5px;
-    }
-    .btn-row button.live-btn.at-live { background: #e94560; }
-    .btn-row button.live-btn.hidden { display: none; }
+    /* ---- Control buttons row ---- */
+    .btn-row { display: flex; align-items: center; gap: 4px; }
     .btn-row .spacer { flex: 1; }
-    .volume-group { display: flex; align-items: center; gap: 4px; }
-    .volume-group button { font-size: 18px; color: #999; background: none; border: none; cursor: pointer; padding: 4px 6px; }
-    .volume-group button:hover { color: #fff; }
+    .ctl {
+      background: none; border: none; color: #fff; cursor: pointer;
+      width: 42px; height: 42px; border-radius: 8px;
+      display: inline-flex; align-items: center; justify-content: center;
+      opacity: 0.92; transition: opacity 0.12s, background 0.12s;
+    }
+    .ctl:hover { opacity: 1; background: rgba(255,255,255,0.12); }
+    .ctl svg { width: 24px; height: 24px; fill: currentColor; }
+    .ctl.play-btn svg { width: 30px; height: 30px; }
+    .ctl .icon-alt { display: none; }
+
+    #playpause.playing .icon-main { display: none; }
+    #playpause.playing .icon-alt { display: block; }
+    #muteBtn.muted .icon-main { display: none; }
+    #muteBtn.muted .icon-alt { display: block; }
+    #fullscreenBtn.fs .icon-main { display: none; }
+    #fullscreenBtn.fs .icon-alt { display: block; }
+
+    .live-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(255,255,255,0.14); border: none; color: rgba(255,255,255,0.85);
+      font-size: 11.5px; font-weight: 800; letter-spacing: 0.8px;
+      padding: 7px 12px; border-radius: 999px; cursor: pointer; margin-left: 8px;
+      text-transform: uppercase; transition: background 0.15s, color 0.15s;
+    }
+    .live-btn .live-dot {
+      width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,0.55);
+      transition: background 0.15s;
+    }
+    .live-btn.at-live { background: var(--accent); color: #fff; }
+    .live-btn.at-live .live-dot { background: #fff; animation: rec-pulse 1.6s ease-in-out infinite; }
+    .live-btn:not(.at-live):hover { background: rgba(255,255,255,0.25); color: #fff; }
+    .live-btn.hidden { display: none; }
+
+    .ctl.rec-btn { color: rgba(255,255,255,0.6); }
+    .ctl.rec-btn svg { width: 20px; height: 20px; }
+    .ctl.rec-btn:hover { color: var(--accent); }
+    .ctl.rec-btn.recording { color: var(--accent); }
+    .ctl.rec-btn.recording svg { animation: rec-pulse 1.6s ease-in-out infinite; }
+    .ctl.rec-btn.hidden { display: none; }
+
+    .volume-group { display: flex; align-items: center; }
     .volume-slider {
-      width: 80px; height: 4px; accent-color: #e94560; cursor: pointer;
-      -webkit-appearance: none; appearance: none; background: #444; border-radius: 2px; outline: none;
+      width: 78px; height: 4px; cursor: pointer; margin-right: 6px;
+      -webkit-appearance: none; appearance: none;
+      background: rgba(255,255,255,0.25); border-radius: 2px; outline: none;
+      accent-color: var(--accent);
     }
     .volume-slider::-webkit-slider-thumb {
       -webkit-appearance: none; width: 12px; height: 12px;
-      background: #eee; border-radius: 50%; cursor: pointer;
+      background: #fff; border-radius: 50%; cursor: pointer;
     }
-    .btn-row button.screen-btn { font-size: 18px; color: #999; }
-    .btn-row button.screen-btn:hover { color: #fff; }
+    @media (hover: none) {
+      .volume-group { display: none; }   /* phones use hardware volume */
+      #theaterBtn { display: none; }
+      .seek-thumb { transform: translate(-50%, -50%) scale(1); }  /* always show on touch */
+      .seek-track { height: 5px; }
+    }
 
     /* Theater mode */
     body.theater .sidebar { display: none; }
     body.theater header { display: none; }
-    body.theater .container { height: 100vh; }
+    body.theater .container { height: 100vh; height: 100dvh; }
 
-    /* Fullscreen tweaks - player area as fullscreen element */
+    /* Fullscreen */
     .player-area:fullscreen, .player-area:-webkit-full-screen { background: #000; }
     .player-area:fullscreen video, .player-area:-webkit-full-screen video {
       width: 100%; height: 100%; object-fit: contain;
     }
-    .player-area:fullscreen .controls, .player-area:-webkit-full-screen .controls {
-      position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;
-      background: rgba(0,0,0,0.7);
-    }
-    /* Fullscreen tweaks - video element as fullscreen element */
     video:fullscreen, video:-webkit-full-screen {
       width: 100%; height: 100%; object-fit: contain;
     }
 
-    .status { position: absolute; color: #888; font-size: 16px; top: 50%; left: 50%; transform: translate(-50%,-50%); }
-    .status.hidden { display: none; }
-    .loading { position: absolute; color: #e94560; font-size: 16px; top: 50%; left: 50%; transform: translate(-50%,-50%); }
-    .loading.hidden { display: none; }
-    .buffering { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); display: none; z-index: 10; }
-    .buffering.visible { display: block; }
-    .buffering .spinner { width: 48px; height: 48px; border: 4px solid rgba(255,255,255,0.3); border-top-color: #e94560; border-radius: 50%; animation: spin 0.8s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .error-msg { position: absolute; color: #e94560; font-size: 16px; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; max-width: 80%; }
-
-    .sidebar-search {
-      padding: 8px 12px; position: sticky; top: 0; background: #16213e; z-index: 1;
-      display: flex; gap: 8px; align-items: center;
-    }
-    .sidebar-search input {
-      flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid #444;
-      background: #1a1a2e; color: #eee; font-size: 14px;
-    }
-    .gear-btn {
-      background: none; border: none; color: #888; font-size: 20px;
-      cursor: pointer; padding: 2px 4px; line-height: 1;
-    }
-    .gear-btn:hover { color: #eee; }
-
+    /* ---------------- Modal ---------------- */
     .modal-overlay {
-      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.72);
       z-index: 100; align-items: center; justify-content: center;
+      backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
     }
     .modal-overlay.open { display: flex; }
     .modal {
-      background: #16213e; border-radius: 8px; padding: 20px; width: 500px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; padding: 20px; width: 500px; max-width: calc(100vw - 32px);
       max-height: 80vh; display: flex; flex-direction: column;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.6);
     }
-    .modal h2 { font-size: 16px; margin-bottom: 12px; }
+    .modal h2 { font-size: 15px; margin-bottom: 12px; font-weight: 700; }
     .modal-search {
-      width: 100%; padding: 6px 10px; border-radius: 4px; border: 1px solid #444;
-      background: #1a1a2e; color: #eee; font-size: 14px; margin-bottom: 10px;
+      width: 100%; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 14px; margin-bottom: 10px; outline: none;
     }
-    .modal-list {
-      flex: 1; overflow-y: auto; max-height: 50vh;
-    }
+    .modal-search:focus { border-color: rgba(233,69,96,0.5); }
+    .modal-list { flex: 1; overflow-y: auto; max-height: 50vh; }
     .modal-ch {
-      display: flex; align-items: center; gap: 10px; padding: 6px 8px;
-      cursor: pointer; border-radius: 4px;
+      display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+      cursor: pointer; border-radius: 8px;
     }
-    .modal-ch:hover { background: #1a1a3e; }
-    .modal-ch input { accent-color: #e94560; width: 16px; height: 16px; cursor: pointer; }
-    .modal-ch .ch-num { font-weight: 700; color: #e94560; min-width: 40px; }
-    .modal-actions {
-      display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end;
-    }
+    .modal-ch:hover { background: var(--surface-2); }
+    .modal-ch input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+    .modal-ch .ch-num { font-weight: 700; color: var(--accent); min-width: 44px; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .modal-actions { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
     .modal-actions button {
-      padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;
-      border: 1px solid #444; background: none; color: #ccc;
+      padding: 7px 18px; border-radius: 8px; cursor: pointer; font-size: 13.5px; font-weight: 600;
+      border: 1px solid var(--border); background: none; color: var(--text-dim);
     }
-    .modal-actions button.primary { background: #0f3460; border-color: #0f3460; color: #fff; }
+    .modal-actions button:hover { color: var(--text); background: var(--surface-2); }
+    .modal-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .modal-actions button.primary:hover { background: #f05a73; }
 
+    /* ---------------- Guide ---------------- */
     .guide-container {
-      height: calc(100vh - 56px); overflow: hidden; display: flex; flex-direction: column;
+      height: calc(100vh - var(--header-h)); overflow: hidden; display: flex; flex-direction: column;
     }
     .guide-toolbar {
-      display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-      background: #16213e; border-bottom: 1px solid #333;
+      display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
     }
     .guide-toolbar button {
-      background: none; border: 1px solid #444; color: #ccc;
-      padding: 5px 14px; border-radius: 4px; cursor: pointer; font-size: 13px;
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;
     }
-    .guide-toolbar button:hover { background: #0f3460; }
-    #guideDate { color: #aaa; font-size: 14px; margin-left: auto; }
+    .guide-toolbar button:hover { background: var(--surface-2); color: var(--text); }
+    #guideDate { color: var(--text-dim); font-size: 13px; margin-left: auto; }
     .guide-grid { flex: 1; overflow: auto; }
-    .guide-time-row, .guide-row { display: flex; border-bottom: 1px solid #222; }
+    .guide-time-row, .guide-row { display: flex; border-bottom: 1px solid rgba(255,255,255,0.05); }
     .guide-ch-label {
       width: 110px; min-width: 110px; padding: 8px 10px; font-size: 13px;
-      background: #16213e; position: sticky; left: 0; z-index: 2;
+      background: var(--surface); position: sticky; left: 0; z-index: 2;
       display: flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden;
-      border-right: 1px solid #333;
+      border-right: 1px solid var(--border);
     }
-    .guide-time-row .guide-ch-label { border-bottom: 1px solid #333; }
+    .guide-time-row .guide-ch-label { border-bottom: 1px solid var(--border); }
+    .guide-programs { position: relative; height: 52px; flex-shrink: 0; }
+    .guide-time-row .guide-programs { height: 30px; }
+    .guide-time-mark {
+      position: absolute; top: 0; font-size: 11px; color: var(--text-faint); padding: 6px 8px;
+      border-left: 1px solid rgba(255,255,255,0.07); height: 100%;
+    }
+    .guide-program {
+      position: absolute; top: 3px; height: calc(100% - 6px);
+      background: var(--surface-2); border-radius: 6px; padding: 4px 8px;
+      overflow: hidden; cursor: pointer; font-size: 12px;
+      display: flex; flex-direction: row; align-items: center;
+      border: 1px solid var(--border);
+    }
+    .guide-prog-text { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+    .guide-program:hover { background: var(--surface-3); border-color: rgba(255,255,255,0.2); z-index: 1; }
+    .guide-program.on-now { background: rgba(233,69,96,0.12); border-color: rgba(233,69,96,0.5); }
+    .guide-prog-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .guide-prog-ep { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .guide-now-line {
+      position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 1;
+      pointer-events: none; box-shadow: 0 0 6px rgba(233,69,96,0.6);
+    }
+    .guide-rec-btn {
+      flex-shrink: 0; font-size: 14px; color: var(--text-faint); cursor: pointer;
+      margin-left: 4px; line-height: 1; padding: 2px;
+    }
+    .guide-rec-btn:hover { color: var(--accent); }
+    .guide-rec-btn.recording { color: var(--accent); }
+
+    /* ---------------- Rec menu ---------------- */
+    .rec-menu {
+      position: fixed; z-index: 200; background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 5px; min-width: 190px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.55);
+    }
+    .rec-menu button {
+      display: block; width: 100%; text-align: left; padding: 9px 12px; border-radius: 7px;
+      background: none; border: none; color: var(--text); font-size: 13.5px; cursor: pointer;
+    }
+    .rec-menu button:hover { background: var(--surface-3); }
+    .rec-menu button.danger { color: var(--accent); }
 
     /* ---------------- Mobile / touch layout ---------------- */
     @media (max-width: 700px) {
-      /* Use natural document scrolling instead of fixed-height flex panes */
       html, body { height: auto; }
-      header { padding: 10px 14px; gap: 10px; }
-      header h1 { font-size: 17px; }
-      header nav { gap: 6px; }
-      header nav button { padding: 8px 12px; font-size: 13px; }
+      header {
+        height: auto; padding: 10px max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
+        gap: 12px; flex-wrap: wrap;
+        padding-top: max(10px, env(safe-area-inset-top));
+      }
+      .brand h1 { font-size: 15px; }
+      header nav { margin-left: auto; }
+      header nav button { padding: 7px 12px; font-size: 12.5px; }
 
       /* Stack the video above the channel/recording list */
       .container { flex-direction: column; height: auto; }
       .player-area {
         flex: none; width: 100%; order: -1;   /* video on top, list below */
-        position: sticky; top: 0; z-index: 20;
+        position: sticky; top: 0; z-index: 30;
       }
       video { flex: none; width: 100%; height: auto; aspect-ratio: 16 / 9; }
 
       .sidebar {
         width: 100%; min-width: 0; flex: none;
-        overflow-y: visible; border-right: none; border-top: 1px solid #333;
+        overflow-y: visible; border-right: none;
       }
       .sidebar-search { position: static; }
 
       /* Larger touch targets in the lists */
-      .channel-item, .recording-item { padding: 14px 16px; }
+      .channel-item, .recording-item { padding: 14px; }
+      .rec-actions { top: 10px; }
+      .rec-delete-btn, .rec-stop-btn { padding: 9px 11px; font-size: 14px; }
 
-      /* Control bar: wrap, bigger tap targets, drop desktop-only controls */
-      .controls { padding: 8px 10px; }
-      .btn-row { flex-wrap: wrap; gap: 6px; row-gap: 8px; }
-      .btn-row button { padding: 8px 12px; font-size: 16px; }
-      .btn-row button.play-btn { font-size: 24px; }
-      .btn-row button.live-btn { margin-left: 6px; }
-      .btn-row .spacer { display: none; }
-      .volume-group { display: none; }   /* phones use hardware volume */
-      #theaterBtn { display: none; }      /* meaningless once the layout is stacked */
+      /* Overlay controls: tighter paddings, larger tap targets */
+      .player-top { padding: 10px 14px 30px; }
+      .np-title { font-size: 14px; }
+      .player-bottom { padding: 26px 12px 8px; }
+      .ctl { width: 44px; height: 44px; }
+      .btn-row { gap: 0; }
+      .live-btn { margin-left: 4px; padding: 8px 12px; }
+      .time-label { min-width: 34px; font-size: 12px; }
+      .seek-row { gap: 8px; }
 
       /* Guide stays horizontally scrollable, just tighter */
-      .guide-container { height: calc(100dvh - 52px); }
+      .guide-container { height: calc(100dvh - 58px); }
       .guide-ch-label { width: 78px; min-width: 78px; font-size: 12px; padding: 6px; }
     }
 
@@ -278,78 +478,24 @@
       body.has-stream video {
         width: 100%; height: 100%; aspect-ratio: auto; object-fit: contain;
       }
-      body.has-stream .controls {
-        position: absolute; bottom: 0; left: 0; right: 0; z-index: 60;
-        background: rgba(0,0,0,0.55);
+      body.has-stream .player-bottom {
+        padding-left: max(20px, env(safe-area-inset-left));
+        padding-right: max(20px, env(safe-area-inset-right));
+        padding-bottom: max(12px, env(safe-area-inset-bottom));
+      }
+      body.has-stream .player-top {
+        padding-left: max(20px, env(safe-area-inset-left));
+        padding-right: max(20px, env(safe-area-inset-right));
       }
     }
-    .guide-programs { position: relative; height: 52px; flex-shrink: 0; }
-    .guide-time-row .guide-programs { height: 30px; }
-    .guide-time-mark {
-      position: absolute; top: 0; font-size: 11px; color: #888; padding: 6px 8px;
-      border-left: 1px solid #333; height: 100%;
-    }
-    .guide-program {
-      position: absolute; top: 2px; height: calc(100% - 4px);
-      background: #1e3a5f; border-radius: 3px; padding: 4px 8px;
-      overflow: hidden; cursor: pointer; font-size: 12px;
-      display: flex; flex-direction: row; align-items: center;
-      border: 1px solid #2a4a6f;
-    }
-    .guide-prog-text {
-      flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
-    }
-    .guide-program:hover { background: #264d73; border-color: #3a6a9f; z-index: 1; }
-    .guide-program.on-now { background: #2e1a3e; border-color: #e94560; }
-    .guide-prog-title {
-      font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .guide-prog-ep {
-      font-size: 11px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .guide-now-line {
-      position: absolute; top: 0; bottom: 0; width: 2px; background: #e94560; z-index: 1;
-      pointer-events: none;
-    }
-    .btn-row button.rec-btn {
-      color: #999; font-size: 18px; padding: 4px 8px; margin-left: 4px;
-      transition: color 0.2s;
-    }
-    .btn-row button.rec-btn:hover { color: #e94560; }
-    .btn-row button.rec-btn.recording { color: #e94560; }
-    .btn-row button.rec-btn.hidden { display: none; }
-    .rec-menu {
-      position: fixed; z-index: 200; background: #16213e; border: 1px solid #444;
-      border-radius: 6px; padding: 4px 0; min-width: 180px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-    }
-    .rec-menu button {
-      display: block; width: 100%; text-align: left; padding: 8px 16px;
-      background: none; border: none; color: #eee; font-size: 14px; cursor: pointer;
-    }
-    .rec-menu button:hover { background: #0f3460; }
-    .rec-menu button.danger { color: #e94560; }
-    .rec-delete-btn, .rec-stop-btn {
-      float: right; color: #666; font-size: 13px; cursor: pointer;
-      padding: 0 4px; line-height: 1;
-    }
-    .rec-delete-btn:hover { color: #e94560; }
-    .rec-stop-btn:hover { color: #e94560; }
-    .ch-rec-dot {
-      color: #e94560; font-size: 10px; font-weight: 700; margin-left: 6px;
-      text-transform: uppercase; letter-spacing: 0.5px;
-    }
-    .guide-rec-btn {
-      flex-shrink: 0; font-size: 14px; color: #666; cursor: pointer;
-      margin-left: 4px; line-height: 1; padding: 2px;
-    }
-    .guide-rec-btn:hover { color: #e94560; }
-    .guide-rec-btn.recording { color: #e94560; }
   </style>
 </head>
 <body>
   <header>
-    <h1>Tablo TV <span style="font-size:11px;font-weight:400;color:#888;vertical-align:middle;">build 10</span></h1>
+    <div class="brand">
+      <h1>Tablo</h1>
+      <span class="build">build 11</span>
+    </div>
     <nav>
       <button id="btn-live" class="active" onclick="showTab('live')">Live TV</button>
       <button id="btn-recordings" onclick="showTab('recordings')">Recordings</button>
@@ -366,42 +512,67 @@
       <div id="channel-list"></div>
       <div id="recording-list" style="display:none"></div>
     </div>
-    <div class="player-area">
-      <div class="status" id="status">Select a channel or recording to start watching</div>
-      <div class="loading hidden" id="loading">Loading stream...</div>
-      <div class="error-msg" id="error"></div>
+    <div class="player-area" id="playerArea">
       <video id="video" autoplay playsinline webkit-playsinline></video>
+      <div class="status" id="status">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg>
+        <span>Select a channel or recording to start watching</span>
+      </div>
+      <div class="loading hidden" id="loading"><div class="spinner"></div><span id="loadingText">Loading stream...</span></div>
+      <div class="error-msg" id="error"></div>
       <div class="buffering" id="buffering"><div class="spinner"></div></div>
-      <div class="controls" id="controls">
-        <div class="seek-row" id="seekRow">
-          <span class="time-label" id="timeCurrent">0:00</span>
-          <div class="seek-bar-wrap" id="seekWrap">
-            <div class="seek-bar">
-              <div class="seek-live-area" id="seekLiveArea"></div>
-              <div class="seek-buffered" id="seekBuffered"></div>
-              <div class="seek-fill" id="seekFill"></div>
-              <div class="seek-live-edge" id="seekLiveEdge"></div>
-              <div class="seek-live-label" id="seekLiveLabel">LIVE</div>
-              <div class="seek-tooltip" id="seekTooltip">0:00</div>
-            </div>
-          </div>
-          <span class="time-label" id="timeTotal">0:00</span>
+
+      <div class="player-ui" id="controls">
+        <div class="player-top">
+          <div class="np-title" id="npTitle"></div>
+          <div class="np-sub" id="npSub"></div>
         </div>
-        <div class="btn-row">
-          <button onclick="seekTo(-60)">-60s</button>
-          <button onclick="seekTo(-10)">-10s</button>
-          <button class="play-btn" onclick="togglePlay()" id="playpause">&#9208;</button>
-          <button onclick="seekTo(10)">+10s</button>
-          <button onclick="seekTo(60)">+60s</button>
-          <button class="live-btn hidden" id="liveBtn" onclick="goLive()">Live</button>
-          <button class="rec-btn hidden" id="recBtn" onclick="toggleRecord(event)" title="Record">&#9679;</button>
-          <span class="spacer"></span>
-          <span class="volume-group">
-            <button onclick="toggleMute()" id="muteBtn" title="Mute">&#128264;</button>
-            <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.05" value="1" oninput="setVolume(this.value)">
-          </span>
-          <button class="screen-btn" onclick="toggleTheater()" id="theaterBtn" title="Theater mode">&#9645;</button>
-          <button class="screen-btn" onclick="toggleFullscreen()" id="fullscreenBtn" title="Fullscreen">&#9974;</button>
+        <div class="player-bottom">
+          <div class="seek-row" id="seekRow">
+            <span class="time-label" id="timeCurrent">0:00</span>
+            <div class="seek-wrap" id="seekWrap">
+              <div class="seek-track">
+                <div class="seek-buffered" id="seekBuffered"></div>
+                <div class="seek-fill" id="seekFill"></div>
+              </div>
+              <div class="seek-thumb" id="seekThumb"></div>
+              <div class="seek-bubble" id="seekBubble">0:00</div>
+            </div>
+            <span class="time-label right" id="timeTotal">0:00</span>
+          </div>
+          <div class="btn-row">
+            <button class="ctl play-btn" onclick="togglePlay()" id="playpause" title="Play/Pause (space)">
+              <svg class="icon-main" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <svg class="icon-alt" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+            </button>
+            <button class="ctl" onclick="seekTo(-10)" title="Back 10 seconds">
+              <svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.3 0 6 2.7 6 6s-2.7 6-6 6-6-2.7-6-6H4c0 4.4 3.6 8 8 8s8-3.6 8-8-3.6-8-8-8z"/><text x="12" y="16.5" text-anchor="middle" font-size="7.5" font-weight="bold" fill="currentColor" stroke="none" font-family="inherit">10</text></svg>
+            </button>
+            <button class="ctl" onclick="seekTo(30)" title="Forward 30 seconds">
+              <svg viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7c-3.3 0-6 2.7-6 6s2.7 6 6 6 6-2.7 6-6h2c0 4.4-3.6 8-8 8s-8-3.6-8-8 3.6-8 8-8z"/><text x="12" y="16.5" text-anchor="middle" font-size="7.5" font-weight="bold" fill="currentColor" stroke="none" font-family="inherit">30</text></svg>
+            </button>
+            <button class="live-btn hidden" id="liveBtn" onclick="goLive()" title="Jump to live">
+              <span class="live-dot"></span>LIVE
+            </button>
+            <button class="ctl rec-btn hidden" id="recBtn" onclick="toggleRecord(event)" title="Record">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg>
+            </button>
+            <span class="spacer"></span>
+            <span class="volume-group">
+              <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.05" value="1" oninput="setVolume(this.value)">
+              <button class="ctl" onclick="toggleMute()" id="muteBtn" title="Mute (m)">
+                <svg class="icon-main" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+                <svg class="icon-alt" viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+              </button>
+            </span>
+            <button class="ctl" onclick="toggleTheater()" id="theaterBtn" title="Theater mode (t)">
+              <svg viewBox="0 0 24 24"><path d="M19 6H5c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 10H5V8h14v8z"/></svg>
+            </button>
+            <button class="ctl" onclick="toggleFullscreen()" id="fullscreenBtn" title="Fullscreen (f)">
+              <svg class="icon-main" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+              <svg class="icon-alt" viewBox="0 0 24 24"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -448,6 +619,8 @@
     let seriesIndex = {}; // cloudShowId -> { path, title, schedule }
     let currentShowId = null; // cloud show ID of what's playing live
     let tunerStatus = []; // active tuner info from device
+
+    const isTouch = window.matchMedia('(hover: none)').matches;
 
     // Resume position tracking — save to localStorage every 5 seconds
     function saveResumePosition() {
@@ -560,10 +733,8 @@
         const date = rec.date ? new Date(rec.date).toLocaleDateString() : '';
         const dur = rec.duration ? Math.round(rec.duration / 60) + ' min' : '';
         const resume = getResumePosition(rec.id);
-        const resumeText = resume > 10 && rec.duration && resume < rec.duration - 30
-          ? fmt(resume) + ' / ' + fmt(rec.duration)
-          : '';
-        const meta = [rec.channel, date, dur].filter(Boolean).join(' - ');
+        const hasResume = resume > 10 && rec.duration && resume < rec.duration - 30;
+        const meta = [rec.channel, date, dur].filter(Boolean).join(' · ');
         const epInfo = rec.seasonNumber && rec.episodeNumber
           ? `S${rec.seasonNumber}E${rec.episodeNumber}: ${rec.episode}`
           : rec.episode;
@@ -579,9 +750,11 @@
           ? `<span class="rec-stop-btn" onclick="stopRec('${rec.id}', event)" title="Stop recording (keep partial)">&#9632;</span>`
           : '';
         return `<div class="recording-item" data-id="${rec.id}" data-search="${esc(search)}" data-duration="${rec.duration}" onclick="playRecording('${rec.id}', ${rec.duration}, this)">
-          <div class="recording-title">${liveBadge}${esc(rec.title)}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span>${stopBtn}${resumeText ? `<span style="float:right;font-size:11px;color:#e94560;margin-right:8px">${resumeText}</span>` : ''}</div>
+          <div class="rec-actions">${stopBtn}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span></div>
+          <div class="recording-title">${liveBadge}${esc(rec.title)}</div>
           ${epInfo ? `<div class="recording-episode">${esc(epInfo)}</div>` : ''}
           ${meta ? `<div class="recording-meta">${esc(meta)}</div>` : ''}
+          ${hasResume ? `<div class="resume-bar" title="Resume at ${fmt(resume)}"><i style="width:${Math.min(100, (resume / rec.duration) * 100)}%"></i></div>` : ''}
         </div>`;
       }).join('');
     }
@@ -650,8 +823,8 @@
     }
 
     // Pull fresh recordings + tuner state and re-render whatever tab is
-     // visible. Used after delete / stop / record so REC badges and the
-     // channel list reflect reality without waiting for the 15s poll.
+    // visible. Used after delete / stop / record so REC badges and the
+    // channel list reflect reality without waiting for the 15s poll.
     async function refreshAll() {
       try {
         await fetch('/api/refresh', { method: 'POST' });
@@ -671,9 +844,9 @@
     }
 
     // Locally clear any tuner entries that point at the just-deleted/stopped
-     // recording. /server/tuners on the device takes a few seconds to flush
-     // after a DELETE, so without this the live-tv tab would still show a
-     // REC badge until the next refresh catches up.
+    // recording. /server/tuners on the device takes a few seconds to flush
+    // after a DELETE, so without this the live-tv tab would still show a
+    // REC badge until the next refresh catches up.
     function dropTunerForRecording(recPath) {
       if (!recPath) return;
       tunerStatus = tunerStatus.map(t =>
@@ -871,6 +1044,11 @@
       }
     }
 
+    function setNowPlaying(title, sub) {
+      document.getElementById('npTitle').textContent = title || '';
+      document.getElementById('npSub').textContent = sub || '';
+    }
+
     async function playChannel(channelId, el) {
       clearActive();
       if (el) el.classList.add('active');
@@ -881,6 +1059,7 @@
 
       // Find what's on now and set currentShowId for the record button
       const ch = channels.find(c => c.id === channelId || String(c.id) === String(channelId));
+      let airingTitle = '';
       if (ch) {
         const now = Date.now();
         liveRecording = recordings.find(r => {
@@ -900,7 +1079,9 @@
         if (currentAiring?.show?.identifier) {
           currentShowId = currentAiring.show.identifier;
         }
+        airingTitle = currentAiring ? (currentAiring.show?.title || currentAiring.title || '') : '';
       }
+      setNowPlaying(ch ? `${ch.number} · ${ch.name}` : 'Live TV', airingTitle);
       updateRecBtn();
 
       if (liveRecording) {
@@ -921,12 +1102,10 @@
       const video = document.getElementById('video');
       const loading = document.getElementById('loading');
       const status = document.getElementById('status');
-      const error = document.getElementById('error');
 
       status.classList.add('hidden');
-      loading.classList.remove('hidden');
-      loading.textContent = 'Loading stream...';
-      error.textContent = '';
+      setLoading('Loading stream...');
+      clearError();
 
       if (hls) { hls.destroy(); hls = null; }
 
@@ -937,7 +1116,7 @@
         currentSessionId = data.sessionId;
 
         // Seek to the live offset
-        loading.textContent = 'Seeking to live...';
+        setLoading('Seeking to live...');
         const seekRes = await fetch(`/api/seek/${currentSessionId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -946,12 +1125,11 @@
         const seekData = await seekRes.json();
         serverOffset = seekData.startOffset;
 
-        loading.textContent = 'Transcoding stream...';
+        setLoading('Preparing stream...');
         await waitForPlaylist(seekData.url);
         loadHls(seekData.url, video, loading);
       } catch (e) {
-        loading.classList.add('hidden');
-        loading.textContent = 'Loading stream...';
+        hideLoading();
         showError('Failed to start stream: ' + e.message);
       }
     }
@@ -977,9 +1155,14 @@
           isLive = false;
           liveRecording = null;
         }
+        const epInfo = rec.seasonNumber && rec.episodeNumber
+          ? `S${rec.seasonNumber}E${rec.episodeNumber}: ${rec.episode}`
+          : rec.episode;
+        setNowPlaying(rec.title, [epInfo, rec.channel].filter(Boolean).join(' · '));
       } else {
         isLive = false;
         liveRecording = null;
+        setNowPlaying('', '');
       }
 
       const resume = getResumePosition(recordingId);
@@ -1020,15 +1203,25 @@
       }
     }
 
+    function setLoading(text) {
+      const loading = document.getElementById('loading');
+      document.getElementById('loadingText').textContent = text;
+      loading.classList.remove('hidden');
+    }
+    function hideLoading() {
+      const loading = document.getElementById('loading');
+      loading.classList.add('hidden');
+      document.getElementById('loadingText').textContent = 'Loading stream...';
+    }
+
     async function playHls(endpoint) {
       const video = document.getElementById('video');
       const status = document.getElementById('status');
       const loading = document.getElementById('loading');
-      const error = document.getElementById('error');
 
       status.classList.add('hidden');
-      loading.classList.remove('hidden');
-      error.textContent = '';
+      setLoading('Loading stream...');
+      clearError();
 
       if (hls) {
         hls.destroy();
@@ -1039,8 +1232,7 @@
         const res = await fetch(endpoint);
         const data = await res.json();
         if (data.error) {
-          loading.classList.add('hidden');
-          loading.textContent = 'Loading stream...';
+          hideLoading();
           showError(data.error);
           return;
         }
@@ -1048,15 +1240,21 @@
         currentSessionId = data.sessionId;
         const playlistUrl = data.url;
 
-        loading.textContent = 'Transcoding stream...';
+        setLoading('Preparing stream...');
         await waitForPlaylist(playlistUrl);
 
         loadHls(playlistUrl, video, loading);
       } catch (e) {
-        loading.classList.add('hidden');
-        loading.textContent = 'Loading stream...';
+        hideLoading();
         showError('Failed to start stream: ' + e.message);
       }
+    }
+
+    function onStreamReady() {
+      hideLoading();
+      document.getElementById('controls').classList.add('visible');
+      document.body.classList.add('has-stream');
+      showUI();
     }
 
     function loadHls(playlistUrl, _ignoredVideo, loading) {
@@ -1090,10 +1288,7 @@
         hls.loadSource(playlistUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          loading.classList.add('hidden');
-          loading.textContent = 'Loading stream...';
-          document.getElementById('controls').classList.add('visible');
-          document.body.classList.add('has-stream');
+          onStreamReady();
           const lb = document.getElementById('liveBtn');
           if (isLive) {
             lb.classList.remove('hidden');
@@ -1134,7 +1329,7 @@
               hls.startLoad(video.currentTime || 0);
             } else {
               showError('Stream error: ' + data.type + ' (' + data.details + ')');
-              loading.classList.add('hidden');
+              hideLoading();
             }
           }
         });
@@ -1142,9 +1337,7 @@
         // Native HLS (iOS Safari).
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', () => {
-          loading.classList.add('hidden');
-          document.getElementById('controls').classList.add('visible');
-          document.body.classList.add('has-stream');
+          onStreamReady();
           const lb = document.getElementById('liveBtn');
           if (isLive) {
             lb.classList.remove('hidden');
@@ -1190,8 +1383,36 @@
       setTimeout(cleanup, 8000);
     }
 
+    // ---------- Unified timeline model ----------
+    // One source of truth for the seek bar / time labels / live chip across
+    // the three playback modes:
+    //   channel  — live channel, sliding DVR window (seekable range)
+    //   liveRec  — in-progress recording; timeline grows in real time to the
+    //              live edge, position is serverOffset + currentTime
+    //   vod      — finished recording, fixed duration
+    function getTimeline() {
+      const v = video;
+      if (isLive && !liveRecording) {
+        const sk = v.seekable;
+        const start = sk && sk.length ? sk.start(0) : 0;
+        const end = sk && sk.length ? sk.end(sk.length - 1) : (isFinite(v.duration) ? v.duration : (v.currentTime || 0));
+        let buffered = end;
+        try { if (v.buffered.length) buffered = v.buffered.end(v.buffered.length - 1); } catch {}
+        return { mode: 'channel', start, end, pos: v.currentTime || 0, edge: end, buffered };
+      }
+      if (liveRecording) {
+        const recStart = new Date(liveRecording.date).getTime();
+        const pos = serverOffset + (v.currentTime || 0);
+        const edge = Math.max(0, (Date.now() - recStart) / 1000, pos);
+        return { mode: 'liveRec', start: 0, end: edge, pos, edge, buffered: serverOffset + (v.duration || 0) };
+      }
+      const end = Math.max(totalDuration || 0, serverOffset + (v.duration || 0));
+      return { mode: 'vod', start: 0, end, pos: serverOffset + (v.currentTime || 0), edge: null, buffered: serverOffset + (v.duration || 0) };
+    }
+
     // Seek relative (skip +/- seconds)
     function seekTo(delta) {
+      showUI();
       const v = document.getElementById('video');
       const currentAbsolute = serverOffset + (v.currentTime || 0);
 
@@ -1223,9 +1444,7 @@
     async function serverSeek(absoluteSeconds) {
       if (!currentSessionId) return;
 
-      const loading = document.getElementById('loading');
-      loading.textContent = 'Seeking...';
-      loading.classList.remove('hidden');
+      setLoading('Seeking...');
 
       if (hls) { hls.destroy(); hls = null; }
 
@@ -1239,9 +1458,9 @@
         serverOffset = data.startOffset;
 
         await waitForPlaylist(data.url);
-        loadHls(data.url, document.getElementById('video'), loading);
+        loadHls(data.url, document.getElementById('video'), document.getElementById('loading'));
       } catch (e) {
-        loading.classList.add('hidden');
+        hideLoading();
         showError('Seek failed: ' + e.message);
       }
     }
@@ -1252,6 +1471,7 @@
     }
 
     function goLive() {
+      showUI();
       if (liveRecording) {
         // In-progress recording: restart the transcode at the live offset. The
         // new session's playlist begins there, so it opens live on every
@@ -1302,9 +1522,7 @@
       const slider = document.getElementById('volumeSlider');
       const vol = v.muted ? 0 : v.volume;
       slider.value = vol;
-      if (vol === 0) btn.innerHTML = '&#128263;';
-      else if (vol < 0.5) btn.innerHTML = '&#128265;';
-      else btn.innerHTML = '&#128266;';
+      btn.classList.toggle('muted', vol === 0);
     }
 
     function isFullscreen() {
@@ -1322,17 +1540,15 @@
           v.webkitEnterFullscreen();
           return;
         }
-        // Try video element fullscreen first (best native macOS behavior),
-        // fall back to player area
-        const target = v.requestFullscreen ? v : document.querySelector('.player-area');
-        const fn = target.requestFullscreen || target.webkitRequestFullscreen;
+        // Fullscreen the player area so our custom overlay controls stay
+        // available (video-element fullscreen would show native controls only).
+        const pa = document.querySelector('.player-area');
+        const fn = pa.requestFullscreen || pa.webkitRequestFullscreen;
         if (fn) {
-          fn.call(target).catch(err => {
+          fn.call(pa).catch(err => {
             console.warn('[fullscreen] Failed:', err);
-            // Fallback: try the player area
-            const pa = document.querySelector('.player-area');
-            const fn2 = pa.requestFullscreen || pa.webkitRequestFullscreen;
-            if (fn2) fn2.call(pa).catch(() => {});
+            const fn2 = v.requestFullscreen || v.webkitRequestFullscreen;
+            if (fn2) fn2.call(v).catch(() => {});
           });
         }
       }
@@ -1340,17 +1556,14 @@
 
     function toggleTheater() {
       document.body.classList.toggle('theater');
-      const btn = document.getElementById('theaterBtn');
-      btn.innerHTML = document.body.classList.contains('theater') ? '&#9635;' : '&#9645;';
     }
 
     // Update fullscreen button icon
     function onFullscreenChange() {
-      document.getElementById('fullscreenBtn').innerHTML = isFullscreen() ? '&#9973;' : '&#9974;';
+      document.getElementById('fullscreenBtn').classList.toggle('fs', !!isFullscreen());
       // Exit theater when entering fullscreen so they feel different
       if (isFullscreen() && document.body.classList.contains('theater')) {
         document.body.classList.remove('theater');
-        document.getElementById('theaterBtn').innerHTML = '&#9645;';
       }
     }
     document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -1365,18 +1578,61 @@
       return m + ':' + String(sec).padStart(2, '0');
     }
 
+    // ---------- Auto-hide overlay controls ----------
+    const playerArea = document.getElementById('playerArea');
+    let uiHideTimer = null;
+
+    function showUI() {
+      playerArea.classList.remove('hide-ui');
+      scheduleHideUI();
+    }
+    function hideUI() {
+      const v = document.getElementById('video');
+      if (v.paused || scrubbing) return;   // keep controls while paused/scrubbing
+      playerArea.classList.add('hide-ui');
+    }
+    function scheduleHideUI() {
+      clearTimeout(uiHideTimer);
+      uiHideTimer = setTimeout(hideUI, 3000);
+    }
+    playerArea.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'mouse') showUI();
+    });
+    playerArea.addEventListener('pointerdown', (e) => {
+      // Any interaction with the controls keeps them visible a while longer
+      if (e.target.closest('.player-top') || e.target.closest('.player-bottom')) showUI();
+    });
+
     // All persistent <video> listeners, bundled so they can be re-bound when
     // the element is recreated (see freshVideo).
     const bufSpinner = document.getElementById('buffering');
     function bindVideoListeners(el) {
-      el.addEventListener('dblclick', toggleFullscreen);
       el.addEventListener('timeupdate', updateControls);
-      el.addEventListener('play', () => { document.getElementById('playpause').innerHTML = '&#9208;'; });
-      el.addEventListener('pause', () => { document.getElementById('playpause').innerHTML = '&#9654;'; });
+      el.addEventListener('play', () => {
+        document.getElementById('playpause').classList.add('playing');
+        scheduleHideUI();
+      });
+      el.addEventListener('pause', () => {
+        document.getElementById('playpause').classList.remove('playing');
+        playerArea.classList.remove('hide-ui');
+        clearTimeout(uiHideTimer);
+      });
       el.addEventListener('waiting', () => bufSpinner.classList.add('visible'));
       el.addEventListener('playing', () => bufSpinner.classList.remove('visible'));
       el.addEventListener('seeked', () => bufSpinner.classList.remove('visible'));
       el.addEventListener('canplay', () => bufSpinner.classList.remove('visible'));
+      el.addEventListener('volumechange', updateVolumeUI);
+      if (isTouch) {
+        // Touch: tap the video toggles the control overlay (like YouTube)
+        el.addEventListener('click', () => {
+          if (playerArea.classList.contains('hide-ui')) showUI();
+          else hideUI();
+        });
+      } else {
+        // Mouse: click = play/pause, double-click = fullscreen
+        el.addEventListener('click', () => { togglePlay(); showUI(); });
+        el.addEventListener('dblclick', toggleFullscreen);
+      }
     }
 
     // Update seek bar and time display
@@ -1407,128 +1663,117 @@
     }
 
     function updateControls() {
-      const v = document.getElementById('video');
-      const seekRow = document.getElementById('seekRow');
+      const t = getTimeline();
       const lb = document.getElementById('liveBtn');
-      const liveEdgeEl = document.getElementById('seekLiveEdge');
-      const liveLabelEl = document.getElementById('seekLiveLabel');
-      const liveAreaEl = document.getElementById('seekLiveArea');
+      const span = Math.max(0, t.end - t.start);
+      const current = Math.max(0, t.pos - t.start);
 
-      if (isLive && !liveRecording) {
-        // Live channel: DVR window. Measure against the seekable range, not
-        // v.duration (which can be Infinity for a native live stream).
-        seekRow.style.display = 'flex';
-        liveEdgeEl.style.display = 'none';
-        liveLabelEl.style.display = 'none';
-        liveAreaEl.style.display = 'none';
-        const sk = v.seekable;
-        const winStart = sk && sk.length ? sk.start(0) : 0;
-        const winEnd = sk && sk.length ? sk.end(sk.length - 1) : (isFinite(v.duration) ? v.duration : (v.currentTime || 0));
-        const total = Math.max(0, winEnd - winStart);
-        const current = Math.max(0, (v.currentTime || 0) - winStart);
-        const lag = winEnd - (v.currentTime || 0);
+      document.getElementById('timeTotal').textContent = fmt(span);
 
+      if (!scrubbing) {
         document.getElementById('timeCurrent').textContent = fmt(current);
-        document.getElementById('timeTotal').textContent = fmt(total);
-
-        const pct = total > 0 ? (current / total) * 100 : 0;
+        const pct = span > 0 ? Math.min(100, (current / span) * 100) : 0;
         document.getElementById('seekFill').style.width = pct + '%';
-        document.getElementById('seekBuffered').style.width = '100%';
+        document.getElementById('seekThumb').style.left = pct + '%';
+        const bufPct = span > 0 ? Math.min(100, ((t.buffered - t.start) / span) * 100) : 0;
+        document.getElementById('seekBuffered').style.width = Math.max(0, bufPct) + '%';
+      }
 
-        lb.classList.toggle('at-live', lag < 30);
-      } else {
-        // Recording mode or live+recording hybrid: show seek bar
-        seekRow.style.display = 'flex';
-        const current = serverOffset + (v.currentTime || 0);
-        const streamEnd = serverOffset + (v.duration || 0);
-        const total = Math.max(totalDuration, streamEnd);
-
-        document.getElementById('timeCurrent').textContent = fmt(current);
-        document.getElementById('timeTotal').textContent = fmt(total);
-
-        const pct = total > 0 ? (current / total) * 100 : 0;
-        document.getElementById('seekFill').style.width = pct + '%';
-
-        const transcoded = serverOffset + (v.duration || 0);
-        const bufPct = total > 0 ? (transcoded / total) * 100 : 0;
-        document.getElementById('seekBuffered').style.width = Math.min(bufPct, 100) + '%';
-
-        if (liveRecording) {
-          const recStart = new Date(liveRecording.date).getTime();
-          const liveEdge = (Date.now() - recStart) / 1000;
-          const livePct = total > 0 ? Math.min((liveEdge / total) * 100, 100) : 0;
-
-          liveEdgeEl.style.display = 'block';
-          liveEdgeEl.style.left = livePct + '%';
-          liveLabelEl.style.display = 'block';
-          liveLabelEl.style.left = livePct + '%';
-          liveAreaEl.style.display = 'block';
-          liveAreaEl.style.width = livePct + '%';
-
-          lb.classList.toggle('at-live', liveEdge - current < 15);
-        } else {
-          liveEdgeEl.style.display = 'none';
-          liveLabelEl.style.display = 'none';
-          liveAreaEl.style.display = 'none';
-        }
+      if (t.edge != null) {
+        const lag = t.edge - t.pos;
+        lb.classList.toggle('at-live', lag < (t.mode === 'channel' ? 30 : 15));
       }
     }
 
-    // Hover tooltip on seek bar
-    const seekTooltip = document.getElementById('seekTooltip');
-    document.getElementById('seekWrap').addEventListener('mousemove', (e) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      if (isLive && !liveRecording) {
-        seekTooltip.textContent = fmt(pct * (video.duration || 0));
-      } else {
-        const total = totalDuration || (serverOffset + (video.duration || 0));
-        seekTooltip.textContent = fmt(pct * total);
-      }
-      seekTooltip.style.left = (pct * 100) + '%';
-    });
+    // ---------- Seek bar scrubbing (pointer events: mouse + touch) ----------
+    const seekWrap = document.getElementById('seekWrap');
+    const seekBubble = document.getElementById('seekBubble');
+    let scrubbing = false;
 
-    // Click on seek bar to jump to position
-    document.getElementById('seekWrap').addEventListener('click', (e) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      const pct = (e.clientX - rect.left) / rect.width;
+    function scrubFraction(e) {
+      const rect = seekWrap.getBoundingClientRect();
+      return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    }
 
-      if (isLive && !liveRecording) {
+    function updateScrubUI(pct) {
+      const t = getTimeline();
+      const span = Math.max(0, t.end - t.start);
+      document.getElementById('seekFill').style.width = (pct * 100) + '%';
+      document.getElementById('seekThumb').style.left = (pct * 100) + '%';
+      seekBubble.style.left = (pct * 100) + '%';
+      seekBubble.textContent = fmt(pct * span);
+      seekBubble.classList.add('visible');
+      document.getElementById('timeCurrent').textContent = fmt(pct * span);
+    }
+
+    function commitSeek(pct) {
+      const t = getTimeline();
+      if (t.mode === 'channel') {
         // Live channel: seek within the DVR window (the seekable range).
-        const sk = video.seekable;
-        const winStart = sk && sk.length ? sk.start(0) : 0;
-        const winEnd = sk && sk.length ? sk.end(sk.length - 1) : (isFinite(video.duration) ? video.duration : winStart);
-        video.currentTime = winStart + pct * Math.max(0, winEnd - winStart);
-      } else {
-        const total = totalDuration || (serverOffset + (video.duration || 0));
-        let target = pct * total;
-
-        // Clamp to live edge
-        if (liveRecording) {
-          const recStart = new Date(liveRecording.date).getTime();
-          const liveEdge = (Date.now() - recStart) / 1000;
-          target = Math.min(target, liveEdge - 5);
-        }
-
-        const localDur = isFinite(video.duration) ? video.duration : 0;
-        if (localDur && target >= serverOffset && target <= serverOffset + localDur) {
-          video.currentTime = target - serverOffset;
-        } else {
-          serverSeek(target);
-        }
+        video.currentTime = t.start + pct * Math.max(0, t.end - t.start);
+        return;
       }
+      let target = pct * t.end;
+      // Clamp to just behind the live edge for an in-progress recording
+      if (t.mode === 'liveRec') target = Math.min(target, t.edge - 5);
+      target = Math.max(0, target);
+
+      const localDur = isFinite(video.duration) ? video.duration : 0;
+      if (localDur && target >= serverOffset && target <= serverOffset + localDur) {
+        video.currentTime = target - serverOffset;
+      } else {
+        serverSeek(target);
+      }
+    }
+
+    seekWrap.addEventListener('pointerdown', (e) => {
+      if (!document.getElementById('controls').classList.contains('visible')) return;
+      scrubbing = true;
+      seekWrap.classList.add('scrubbing');
+      seekWrap.setPointerCapture(e.pointerId);
+      updateScrubUI(scrubFraction(e));
+      e.preventDefault();
+    });
+    seekWrap.addEventListener('pointermove', (e) => {
+      if (scrubbing) {
+        updateScrubUI(scrubFraction(e));
+        showUI();
+      } else if (e.pointerType === 'mouse') {
+        // Hover preview bubble
+        const t = getTimeline();
+        const pct = scrubFraction(e);
+        seekBubble.style.left = (pct * 100) + '%';
+        seekBubble.textContent = fmt(pct * Math.max(0, t.end - t.start));
+        seekBubble.classList.add('visible');
+      }
+    });
+    seekWrap.addEventListener('pointerup', (e) => {
+      if (!scrubbing) return;
+      scrubbing = false;
+      seekWrap.classList.remove('scrubbing');
+      seekBubble.classList.remove('visible');
+      commitSeek(scrubFraction(e));
+      showUI();
+    });
+    seekWrap.addEventListener('pointercancel', () => {
+      scrubbing = false;
+      seekWrap.classList.remove('scrubbing');
+      seekBubble.classList.remove('visible');
+    });
+    seekWrap.addEventListener('pointerleave', () => {
+      if (!scrubbing) seekBubble.classList.remove('visible');
     });
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT') return;
       switch (e.key) {
-        case ' ': e.preventDefault(); togglePlay(); break;
+        case ' ': e.preventDefault(); togglePlay(); showUI(); break;
         case 'ArrowLeft': e.preventDefault(); seekTo(-10); break;
         case 'ArrowRight': e.preventDefault(); seekTo(10); break;
         case 'j': seekTo(-10); break;
         case 'l': seekTo(10); break;
-        case 'k': togglePlay(); break;
+        case 'k': togglePlay(); showUI(); break;
         case 'f': toggleFullscreen(); break;
         case 't': toggleTheater(); break;
         case 'm': toggleMute(); break;
@@ -1550,8 +1795,19 @@
       }
     }
 
+    let errorTimer = null;
     function showError(msg) {
-      document.getElementById('error').textContent = msg;
+      const el = document.getElementById('error');
+      el.textContent = msg;
+      el.classList.add('visible');
+      clearTimeout(errorTimer);
+      errorTimer = setTimeout(() => el.classList.remove('visible'), 8000);
+    }
+    function clearError() {
+      const el = document.getElementById('error');
+      el.textContent = '';
+      el.classList.remove('visible');
+      clearTimeout(errorTimer);
     }
 
     let pickerSelection = new Set();
