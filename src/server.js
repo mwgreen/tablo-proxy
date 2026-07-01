@@ -7,7 +7,7 @@ import {
   getChannels, getRecordings, getGuideData,
   startWatch, startRecordingWatch, fetchChannels, fetchRecordings, fetchGuide, fetchSeriesIndex,
   resolveChannelId, getSeriesIndex, scheduleSeries, unscheduleSeries, getScheduledSeries,
-  getTunerStatus, scheduleAiring, deleteRecording, stopRecording,
+  getTunerStatus, scheduleAiring, deleteRecording, stopRecording, getRecordingStatus,
 } from './tablo.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -169,6 +169,15 @@ app.delete('/api/record/:showId', async (req, res) => {
     res.json({ ok: true, schedule: data.schedule });
   } catch (e) {
     res.status(400).json({ error: e.message });
+  }
+});
+
+// Fresh capture state for one recording (polled while watching a live recording)
+app.get('/api/recording/:recordingId/status', async (req, res) => {
+  try {
+    res.json(await getRecordingStatus(req.params.recordingId));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

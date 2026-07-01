@@ -207,6 +207,11 @@ export async function fetchRecordings() {
         description: ep.episode?.description || ep.event?.description || series?.series?.description || '',
         date: ep.airing_details?.datetime || '',
         duration: ep.airing_details?.duration || 0,
+        // Authoritative capture state from the device: 'recording' while the
+        // tuner is capturing, 'finished' / 'failed' after. The wall-clock
+        // (date + scheduled duration) guess is wrong for stopped partials.
+        state: ep.video_details?.state || '',
+        recordedDuration: ep.video_details?.duration || 0,
         channel: ch ? `${ch.major}.${ch.minor} ${ch.call_sign}` : '',
         imageId: ep.snapshot_image?.image_id || null,
       });
@@ -333,6 +338,22 @@ export async function scheduleAiring(showId, airingDatetime, schedule = true, ch
   }
 
   throw new Error('Airing not found on device');
+}
+
+// Fresh capture state for a single recording — cheap enough to poll while
+// someone is watching an in-progress recording, unlike a full fetchRecordings
+// scan. Also updates the cached entry so list renders agree.
+export async function getRecordingStatus(recordingId) {
+  const rec = recordings.find(r => String(r.id) === String(recordingId));
+  const path = rec?.path || `/recordings/series/episodes/${recordingId}`;
+  const ep = await deviceRequest('GET', path);
+  const state = ep.video_details?.state || '';
+  const recordedDuration = ep.video_details?.duration || 0;
+  if (rec) {
+    rec.state = state;
+    rec.recordedDuration = recordedDuration;
+  }
+  return { id: recordingId, state, recordedDuration, scheduledDuration: ep.airing_details?.duration || 0 };
 }
 
 export async function deleteRecording(recordingId) {

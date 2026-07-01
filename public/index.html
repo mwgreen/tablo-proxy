@@ -170,6 +170,10 @@
       backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     }
     .error-msg.visible { display: block; }
+    .error-msg.info {
+      border-color: rgba(255,255,255,0.18); color: #dfe3ec;
+      background: rgba(16,18,26,0.92);
+    }
 
     /* ---------------- Player UI overlay ---------------- */
     .player-ui {
@@ -253,6 +257,7 @@
     .ctl svg { width: 24px; height: 24px; fill: currentColor; }
     .ctl.play-btn svg { width: 30px; height: 30px; }
     .ctl .icon-alt { display: none; }
+    .ctl.hidden-btn { display: none; }
 
     #playpause.playing .icon-main { display: none; }
     #playpause.playing .icon-alt { display: block; }
@@ -282,6 +287,8 @@
     .ctl.rec-btn:hover { color: var(--accent); }
     .ctl.rec-btn.recording { color: var(--accent); }
     .ctl.rec-btn.recording svg { animation: rec-pulse 1.6s ease-in-out infinite; }
+    .ctl.rec-btn.pending { color: var(--accent); opacity: 0.65; }
+    .ctl.rec-btn.pending svg { animation: rec-pulse 0.7s ease-in-out infinite; }
     .ctl.rec-btn.hidden { display: none; }
 
     .volume-group { display: flex; align-items: center; }
@@ -424,6 +431,8 @@
         height: auto; padding: 10px max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
         gap: 12px; flex-wrap: wrap;
         padding-top: max(10px, env(safe-area-inset-top));
+        /* Keep the tab bar on screen while the list scrolls */
+        position: sticky; top: 0; z-index: 40;
       }
       .brand h1 { font-size: 15px; }
       header nav { margin-left: auto; }
@@ -433,7 +442,9 @@
       .container { flex-direction: column; height: auto; }
       .player-area {
         flex: none; width: 100%; order: -1;   /* video on top, list below */
-        position: sticky; top: 0; z-index: 30;
+        position: sticky; z-index: 30;
+        /* Pin directly below the sticky header (JS keeps the var in sync) */
+        top: var(--header-h-mobile, 48px);
       }
       video { flex: none; width: 100%; height: auto; aspect-ratio: 16 / 9; }
 
@@ -494,7 +505,7 @@
   <header>
     <div class="brand">
       <h1>Tablo</h1>
-      <span class="build">build 11</span>
+      <span class="build">build 14</span>
     </div>
     <nav>
       <button id="btn-live" class="active" onclick="showTab('live')">Live TV</button>
@@ -565,6 +576,9 @@
                 <svg class="icon-alt" viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
               </button>
             </span>
+            <button class="ctl hidden-btn" onclick="togglePip()" id="pipBtn" title="Picture in Picture — keeps playing when you switch apps">
+              <svg viewBox="0 0 24 24"><path d="M19 7h-8v6h8V7zm2-4H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16.01H3V4.98h18v14.03z"/></svg>
+            </button>
             <button class="ctl" onclick="toggleTheater()" id="theaterBtn" title="Theater mode (t)">
               <svg viewBox="0 0 24 24"><path d="M19 6H5c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 10H5V8h14v8z"/></svg>
             </button>
@@ -619,8 +633,18 @@
     let seriesIndex = {}; // cloudShowId -> { path, title, schedule }
     let currentShowId = null; // cloud show ID of what's playing live
     let tunerStatus = []; // active tuner info from device
+    let recPending = false; // record requested for the current airing; tuner hasn't confirmed capture yet
 
     const isTouch = window.matchMedia('(hover: none)').matches;
+
+    // Mobile: header and video are both sticky; the video pins just below
+    // the header, whose height varies (safe-area inset, nav wrapping).
+    function syncHeaderOffset() {
+      const h = document.querySelector('header').offsetHeight;
+      document.documentElement.style.setProperty('--header-h-mobile', h + 'px');
+    }
+    window.addEventListener('resize', syncHeaderOffset);
+    syncHeaderOffset();
 
     // Resume position tracking — save to localStorage every 5 seconds
     function saveResumePosition() {
@@ -730,11 +754,16 @@
         return 0;
       });
       list.innerHTML = sorted.map(rec => {
-        const date = rec.date ? new Date(rec.date).toLocaleDateString() : '';
-        const dur = rec.duration ? Math.round(rec.duration / 60) + ' min' : '';
+        // Date AND time: repeated captures of the same episode (record, stop,
+        // record again) are otherwise indistinguishable in the list.
+        const d = rec.date ? new Date(rec.date) : null;
+        const date = d ? d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+        const effDur = effectiveDuration(rec);
+        const dur = effDur ? Math.round(effDur / 60) + ' min' : '';
+        const isPartial = rec.state && rec.state !== 'recording' && rec.recordedDuration && rec.duration && rec.recordedDuration < rec.duration * 0.85;
         const resume = getResumePosition(rec.id);
-        const hasResume = resume > 10 && rec.duration && resume < rec.duration - 30;
-        const meta = [rec.channel, date, dur].filter(Boolean).join(' · ');
+        const hasResume = resume > 10 && effDur && resume < effDur - 30;
+        const meta = [rec.channel, date, dur, isPartial ? 'partial' : '', rec.state === 'failed' ? 'failed' : ''].filter(Boolean).join(' · ');
         const epInfo = rec.seasonNumber && rec.episodeNumber
           ? `S${rec.seasonNumber}E${rec.episodeNumber}: ${rec.episode}`
           : rec.episode;
@@ -749,20 +778,31 @@
         const stopBtn = inProgress
           ? `<span class="rec-stop-btn" onclick="stopRec('${rec.id}', event)" title="Stop recording (keep partial)">&#9632;</span>`
           : '';
-        return `<div class="recording-item" data-id="${rec.id}" data-search="${esc(search)}" data-duration="${rec.duration}" onclick="playRecording('${rec.id}', ${rec.duration}, this)">
+        return `<div class="recording-item" data-id="${rec.id}" data-search="${esc(search)}" data-duration="${effDur}" onclick="playRecording('${rec.id}', ${effDur}, this)">
           <div class="rec-actions">${stopBtn}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span></div>
           <div class="recording-title">${liveBadge}${esc(rec.title)}</div>
           ${epInfo ? `<div class="recording-episode">${esc(epInfo)}</div>` : ''}
           ${meta ? `<div class="recording-meta">${esc(meta)}</div>` : ''}
-          ${hasResume ? `<div class="resume-bar" title="Resume at ${fmt(resume)}"><i style="width:${Math.min(100, (resume / rec.duration) * 100)}%"></i></div>` : ''}
+          ${hasResume ? `<div class="resume-bar" title="Resume at ${fmt(resume)}"><i style="width:${Math.min(100, (resume / effDur) * 100)}%"></i></div>` : ''}
         </div>`;
       }).join('');
     }
 
     function isInProgress(rec, now) {
+      // The device's capture state is authoritative: a stopped partial is
+      // 'finished' even though the wall clock says the airing is still on.
+      if (rec.state) return rec.state === 'recording';
       if (!rec.date || !rec.duration) return false;
       const start = new Date(rec.date).getTime();
       return now >= start && now < start + rec.duration * 1000;
+    }
+
+    // Actual watchable length: the device-reported recorded duration for
+    // completed captures (partials are shorter than scheduled), scheduled
+    // duration otherwise.
+    function effectiveDuration(rec) {
+      const finished = rec.state && rec.state !== 'recording';
+      return (finished && rec.recordedDuration) ? rec.recordedDuration : (rec.duration || 0);
     }
 
     function getCurrentAiring(channelId) {
@@ -855,12 +895,18 @@
     }
 
     async function deleteRec(recordingId, event) {
-      event.stopPropagation();
+      if (event) event.stopPropagation();
       const rec = recordings.find(r => String(r.id) === String(recordingId));
       const name = rec ? `${rec.title}${rec.episode ? ' - ' + rec.episode : ''}` : 'this recording';
-      if (!confirm(`Delete ${name}?`)) return;
+      const watchingIt = String(currentRecordingId) === String(recordingId);
+      const msg = watchingIt
+        ? `Delete ${name}? You're watching it — playback will stop.`
+        : `Delete ${name}?`;
+      if (!confirm(msg)) return;
       try {
         await fetch('/api/recording/' + recordingId, { method: 'DELETE' });
+        localStorage.removeItem('resume_' + recordingId);
+        if (watchingIt) stopPlayback();
         // Optimistic local update — drop the recording from our list and
         // free its tuner slot. Tablo's tuner state lags the DELETE by a
         // few seconds, so reading /api/tuners right now would still show
@@ -878,7 +924,7 @@
     }
 
     async function stopRec(recordingId, event) {
-      event.stopPropagation();
+      if (event) event.stopPropagation();
       const rec = recordings.find(r => String(r.id) === String(recordingId));
       const name = rec ? `${rec.title}${rec.episode ? ' - ' + rec.episode : ''}` : 'this recording';
       if (!confirm(`Stop recording ${name}? (Keeps what's been recorded so far.)`)) return;
@@ -889,6 +935,12 @@
         // Stop keeps the recording in the list (with the partial), but the
         // tuner is freed. Drop the tuner binding optimistically.
         dropTunerForRecording(rec?.path);
+        if (rec) rec.state = 'finished';
+        // If we're watching this capture, transition the player right away
+        // instead of waiting for the status poll to notice.
+        if (liveRecording && String(liveRecording.id) === String(recordingId)) {
+          endLiveWatch(null);
+        }
         if (currentTab === 'live') renderChannels();
         if (currentTab === 'guide') renderGuide();
         if (currentTab === 'recordings') renderRecordings();
@@ -944,12 +996,41 @@
       // not enough — Tablo may be skipping this airing for conflicts or
       // dedup reasons. Reflected via tooltip instead.
       const isCapturing = currentChannelId != null && isChannelRecording(currentChannelId);
+      if (isCapturing) recPending = false;
       btn.classList.toggle('recording', isCapturing);
+      // Pending = we asked for a recording but the tuner hasn't started
+      // capturing yet (Tablo takes ~10-40s). Distinct fast-pulse style so the
+      // click visibly did something.
+      btn.classList.toggle('pending', !isCapturing && recPending);
       btn.title = isCapturing
-        ? 'Recording now'
-        : seriesScheduled
-          ? 'Series scheduled — click to manage'
-          : 'Record this show';
+        ? 'Recording now — click to manage'
+        : recPending
+          ? 'Recording scheduled — starting shortly'
+          : seriesScheduled
+            ? 'Series scheduled — click to manage'
+            : 'Record this show';
+    }
+
+    // After scheduling a recording for the current airing, poll the tuners
+    // quickly until capture actually starts so the button turns red without
+    // the user wondering whether the click worked.
+    async function fastPollTuners(times = 10, intervalMs = 4000) {
+      for (let i = 0; i < times && recPending; i++) {
+        await new Promise(r => setTimeout(r, intervalMs));
+        try {
+          const fresh = await (await fetch('/api/tuners')).json();
+          if (Array.isArray(fresh)) tunerStatus = fresh;
+        } catch {}
+        updateRecBtn();
+        if (currentChannelId != null && isChannelRecording(currentChannelId)) {
+          showToast('Recording started');
+          if (currentTab === 'live') renderChannels();
+          refreshAll();   // pull the new recording into the list
+          return;
+        }
+      }
+      recPending = false;
+      updateRecBtn();
     }
 
     function toggleRecord(event) {
@@ -988,7 +1069,19 @@
       menu.id = 'recMenu';
 
       let html = '';
-      if (airingDatetime) {
+      // If this airing is being captured right now on the channel we're
+      // watching, the natural action is stopping THAT capture — offer it
+      // first instead of making the user hunt for the partial in the list.
+      let capturingRec = null;
+      if (currentChannelId != null && isChannelRecording(currentChannelId)) {
+        const ch = channels.find(c => String(c.id) === String(currentChannelId));
+        capturingRec = liveRecording
+          || (ch && recordings.find(r => isInProgress(r, Date.now()) && r.channel.startsWith(ch.number + ' ')))
+          || null;
+      }
+      if (capturingRec) {
+        html += `<button class="danger" onclick="closeRecMenu(); stopRec('${escAttr(String(capturingRec.id))}')">Stop recording (keep partial)</button>`;
+      } else if (airingDatetime) {
         const chArg = channelIdentifier ? `'${escAttr(channelIdentifier)}'` : 'null';
         html += `<button onclick="doRecordAction('single', '${escAttr(showId)}', '${escAttr(airingDatetime)}', ${chArg})">Record this episode</button>`;
       }
@@ -1018,6 +1111,16 @@
           });
           const data = await res.json();
           if (data.error) { showError(data.error); return; }
+          // Airing currently on and we're watching its channel: give
+          // immediate feedback and chase the tuner until capture starts.
+          const airingNow = datetime && Date.now() >= new Date(datetime).getTime();
+          if (airingNow && currentChannelId != null && showId === currentShowId) {
+            recPending = true;
+            showToast('Recording scheduled — starting shortly');
+            fastPollTuners();
+          } else {
+            showToast('Recording scheduled');
+          }
         } else if (action === 'series-new' || action === 'series-all') {
           const rule = action === 'series-new' ? 'new' : 'all';
           const res = await fetch('/api/record/' + encodeURIComponent(showId), { method: 'POST',
@@ -1027,11 +1130,17 @@
           const data = await res.json();
           if (data.error) { showError(data.error); return; }
           if (entry) entry.schedule = rule;
+          showToast(rule === 'new' ? 'Recording new episodes' : 'Recording all episodes');
+          if (currentChannelId != null && showId === currentShowId) {
+            recPending = true;
+            fastPollTuners();
+          }
         } else if (action === 'cancel-series') {
           const res = await fetch('/api/record/' + encodeURIComponent(showId), { method: 'DELETE' });
           const data = await res.json();
           if (data.error) { showError(data.error); return; }
           if (entry) entry.schedule = 'none';
+          showToast('Series recording canceled');
         }
         updateRecBtn();
         // Tablo takes a few seconds to register a new schedule on its tuner,
@@ -1056,18 +1165,16 @@
       isLive = true;
       liveRecording = null;
       currentShowId = null;
+      recPending = false;
 
       // Find what's on now and set currentShowId for the record button
       const ch = channels.find(c => c.id === channelId || String(c.id) === String(channelId));
       let airingTitle = '';
       if (ch) {
         const now = Date.now();
-        liveRecording = recordings.find(r => {
-          if (!r.channel.startsWith(ch.number + ' ')) return false;
-          const start = new Date(r.date).getTime();
-          const end = start + r.duration * 1000;
-          return now >= start && now <= end;
-        }) || null;
+        liveRecording = recordings.find(r =>
+          isInProgress(r, now) && r.channel.startsWith(ch.number + ' ')
+        ) || null;
 
         // Find current airing's show ID for recording
         const airings = guideData[ch.id] || [];
@@ -1096,6 +1203,7 @@
         serverOffset = 0;
         await playHls(`/stream/hls/channel/${channelId}`);
       }
+      startLiveStatusPoll();
     }
 
     async function playRecordingAtOffset(recordingId, offset) {
@@ -1142,18 +1250,17 @@
       currentShowId = null;
       updateRecBtn();
 
-      // Detect if this recording is currently in progress
+      // Detect if this recording is currently in progress (device state)
       const rec = recordings.find(r => String(r.id) === String(recordingId));
       if (rec) {
-        const now = Date.now();
-        const start = new Date(rec.date).getTime();
-        const end = start + rec.duration * 1000;
-        if (now >= start && now <= end) {
+        if (isInProgress(rec, Date.now())) {
           isLive = true;
           liveRecording = rec;
+          totalDuration = rec.duration;   // scheduled length caps the live edge
         } else {
           isLive = false;
           liveRecording = null;
+          totalDuration = effectiveDuration(rec) || duration;
         }
         const epInfo = rec.seasonNumber && rec.episodeNumber
           ? `S${rec.seasonNumber}E${rec.episodeNumber}: ${rec.episode}`
@@ -1166,13 +1273,14 @@
       }
 
       const resume = getResumePosition(recordingId);
-      if (resume > 10 && resume < duration - 30) {
+      if (resume > 10 && resume < totalDuration - 30) {
         serverOffset = resume;
         await playHls(`/stream/hls/recording/${recordingId}?offset=${resume}`);
       } else {
         serverOffset = 0;
         await playHls(`/stream/hls/recording/${recordingId}`);
       }
+      startLiveStatusPoll();
     }
 
     function clearActive() {
@@ -1201,6 +1309,91 @@
       } finally {
         setTimeout(() => { recovering = false; }, 3000);
       }
+    }
+
+    // ---------- Live-recording lifecycle ----------
+    // While watching an in-progress recording, poll its capture state so the
+    // player reacts when the capture ends — whether it ended on schedule, was
+    // stopped from this UI, or was stopped/canceled elsewhere. Without this
+    // the timeline grows on wall-clock forever and the LIVE chip lies.
+    let liveStatusTimer = null;
+
+    function startLiveStatusPoll() {
+      stopLiveStatusPoll();
+      if (liveRecording) liveStatusTimer = setInterval(checkLiveRecordingStatus, 10000);
+    }
+    function stopLiveStatusPoll() {
+      if (liveStatusTimer) { clearInterval(liveStatusTimer); liveStatusTimer = null; }
+    }
+
+    async function checkLiveRecordingStatus() {
+      if (!liveRecording) { stopLiveStatusPoll(); return; }
+      try {
+        const res = await fetch(`/api/recording/${liveRecording.id}/status`);
+        if (!res.ok) return;
+        const s = await res.json();
+        if (s.state && s.state !== 'recording') endLiveWatch(s);
+      } catch {}
+    }
+
+    // The capture behind the stream we're watching has ended. Two intents:
+    //  - user picked a CHANNEL (currentChannelId set) and is near the live
+    //    edge: they're watching TV — reopen the direct channel stream so
+    //    live playback continues into the next show.
+    //  - user picked the RECORDING (or has rewound): flip the player to
+    //    plain VOD of what was captured; they keep watching, the timeline
+    //    freezes at the real end, the LIVE chip goes away.
+    function endLiveWatch(status) {
+      stopLiveStatusPoll();
+      const rec = liveRecording;
+      if (!rec) return;
+      // Sync the cached list entry so re-renders (and playChannel's
+      // in-progress match) see the capture as over.
+      const cached = recordings.find(r => String(r.id) === String(rec.id));
+      if (cached && cached.state !== 'finished') cached.state = status?.state || 'finished';
+      if (cached && status?.recordedDuration) cached.recordedDuration = status.recordedDuration;
+
+      const t = getTimeline();
+      const nearLive = t.edge != null && (t.edge - t.pos) < 60;
+      liveRecording = null;
+
+      if (currentChannelId != null && nearLive) {
+        showToast('Recording ended — continuing live');
+        const el = document.querySelector(`.channel-item[data-id="${currentChannelId}"]`);
+        playChannel(currentChannelId, el);
+        return;
+      }
+
+      isLive = false;
+      totalDuration = (status?.recordedDuration)
+        || (cached && cached.recordedDuration)
+        || Math.max(0, serverOffset + (video.duration || 0))
+        || rec.duration;
+      updateRecBtn();
+      updateControls();
+      if (currentTab === 'recordings') renderRecordings();
+      showToast('Recording ended');
+    }
+
+    // Tear the player down to the idle state (used when the recording being
+    // watched is deleted out from under us).
+    function stopPlayback() {
+      stopLiveStatusPoll();
+      const sid = currentSessionId;
+      currentSessionId = null;
+      if (sid) fetch('/api/stop/' + sid, { method: 'POST' }).catch(() => {});
+      currentRecordingId = null;
+      currentChannelId = null;
+      isLive = false;
+      liveRecording = null;
+      currentShowId = null;
+      freshVideo();   // blank element, drops src and any hls.js instance
+      document.getElementById('controls').classList.remove('visible');
+      document.body.classList.remove('has-stream');
+      document.getElementById('status').classList.remove('hidden');
+      setNowPlaying('', '');
+      updateRecBtn();
+      document.querySelectorAll('.channel-item, .recording-item').forEach(el => el.classList.remove('active'));
     }
 
     function setLoading(text) {
@@ -1254,6 +1447,8 @@
       hideLoading();
       document.getElementById('controls').classList.add('visible');
       document.body.classList.add('has-stream');
+      // PiP support is per-element; the video is recreated on each open
+      document.getElementById('pipBtn').classList.toggle('hidden-btn', !pipSupported(document.getElementById('video')));
       showUI();
     }
 
@@ -1403,7 +1598,12 @@
       if (liveRecording) {
         const recStart = new Date(liveRecording.date).getTime();
         const pos = serverOffset + (v.currentTime || 0);
-        const edge = Math.max(0, (Date.now() - recStart) / 1000, pos);
+        // Live edge from wall clock, capped at the scheduled length so the
+        // bar stops growing once the airing is over (the status poll then
+        // flips us to VOD); never behind the playhead.
+        let edge = (Date.now() - recStart) / 1000;
+        if (liveRecording.duration) edge = Math.min(edge, liveRecording.duration);
+        edge = Math.max(0, edge, pos);
         return { mode: 'liveRec', start: 0, end: edge, pos, edge, buffered: serverOffset + (v.duration || 0) };
       }
       const end = Math.max(totalDuration || 0, serverOffset + (v.duration || 0));
@@ -1418,8 +1618,7 @@
 
       let maxPos = totalDuration || Infinity;
       if (liveRecording) {
-        const recStart = new Date(liveRecording.date).getTime();
-        maxPos = (Date.now() - recStart) / 1000 - 5;
+        maxPos = getTimeline().edge - 5;
       }
 
       const targetAbsolute = Math.max(0, Math.min(maxPos, currentAbsolute + delta));
@@ -1554,6 +1753,31 @@
       }
     }
 
+    // Picture-in-Picture: floating video that keeps playing across app
+    // switches. iOS Safari uses the webkit presentation-mode API; desktop
+    // browsers use the standard one. Must be called from a user gesture.
+    function pipSupported(v) {
+      if (typeof v.webkitSetPresentationMode === 'function'
+          && typeof v.webkitSupportsPresentationMode === 'function'
+          && v.webkitSupportsPresentationMode('picture-in-picture')) return true;
+      return !!(document.pictureInPictureEnabled && v.requestPictureInPicture);
+    }
+
+    function togglePip() {
+      const v = document.getElementById('video');
+      if (typeof v.webkitSetPresentationMode === 'function') {
+        v.webkitSetPresentationMode(
+          v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture'
+        );
+        return;
+      }
+      if (document.pictureInPictureElement) {
+        document.exitPictureInPicture().catch(() => {});
+      } else if (v.requestPictureInPicture) {
+        v.requestPictureInPicture().catch((e) => showError('Picture-in-Picture failed: ' + e.message));
+      }
+    }
+
     function toggleTheater() {
       document.body.classList.toggle('theater');
     }
@@ -1679,6 +1903,11 @@
         document.getElementById('seekBuffered').style.width = Math.max(0, bufPct) + '%';
       }
 
+      // Chip visibility follows the playback mode so a live→VOD transition
+      // (capture ended while watching) hides it without a stream reload.
+      if (document.getElementById('controls').classList.contains('visible')) {
+        lb.classList.toggle('hidden', t.edge == null);
+      }
       if (t.edge != null) {
         const lag = t.edge - t.pos;
         lb.classList.toggle('at-live', lag < (t.mode === 'channel' ? 30 : 15));
@@ -1796,12 +2025,16 @@
     }
 
     let errorTimer = null;
-    function showError(msg) {
+    function showToast(msg, kind = 'info') {
       const el = document.getElementById('error');
       el.textContent = msg;
+      el.classList.toggle('info', kind === 'info');
       el.classList.add('visible');
       clearTimeout(errorTimer);
-      errorTimer = setTimeout(() => el.classList.remove('visible'), 8000);
+      errorTimer = setTimeout(() => el.classList.remove('visible'), kind === 'info' ? 4000 : 8000);
+    }
+    function showError(msg) {
+      showToast(msg, 'error');
     }
     function clearError() {
       const el = document.getElementById('error');
