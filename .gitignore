@@ -9,3 +9,5 @@ bin/ffmpeg
 bin/ffprobe
 public/test*.mp4
 swift-transcoder/.build/
+!public/icon-*.png
+!public/apple-touch-icon.png

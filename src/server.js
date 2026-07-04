@@ -546,6 +546,9 @@ function proxyHlsAsStream(playlistUrl, req, res) {
 }
 
 export function startServer(port) {
+  // Session dirs from a previous run are unreachable (the sessions map is
+  // empty) — clear them so data/hls doesn't accumulate stale directories.
+  try { rmSync(TRANSCODE_DIR, { recursive: true, force: true }); } catch {}
   mkdirSync(TRANSCODE_DIR, { recursive: true });
 
   // Clean up any stale transcode processes from previous runs
