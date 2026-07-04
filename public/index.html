@@ -848,7 +848,12 @@
         const end = start + ((a.duration || 1800) * 1000);
         return now >= start && now <= end;
       });
-      return current ? (current.title || current.series_title || '') : null;
+      if (!current) return null;
+      // Prefer series title (matches the guide grid); append episode title when distinct.
+      const series = current.show?.title || current.series_title || '';
+      const episode = current.title || '';
+      if (series && episode && series !== episode) return `${series} · ${episode}`;
+      return series || episode || null;
     }
 
     function showTab(tab) {
