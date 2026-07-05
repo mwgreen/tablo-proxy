@@ -9,10 +9,13 @@ import {
   resolveChannelId, getSeriesIndex, scheduleSeries, unscheduleSeries, getScheduledSeries,
   getTunerStatus, scheduleAiring, deleteRecording, stopRecording, getRecordingStatus,
 } from './tablo.js';
+import { IS_LINUX, FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs } from './encode.js';
+import {
+  getLibrary, getArchiveJobs, enqueueArchive, deleteLibraryEntry, getLibraryEntry,
+  libraryFilePath, libraryThumbPath,
+} from './library.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const IS_LINUX = process.platform === 'linux';
-const FFMPEG = process.env.FFMPEG_PATH || (IS_LINUX ? 'ffmpeg' : '/opt/homebrew/bin/ffmpeg');
 const HLS_TRANSCODE = join(__dirname, '..', 'bin', 'hls-transcode');
 // Swift GPU transcoder is macOS-only; on Linux always use FFmpeg with hardware accel
 const USE_GPU = process.env.ENCODER === 'gpu' && !IS_LINUX;
@@ -20,59 +23,6 @@ const app = express();
 const DATA_DIR = join(__dirname, '..', 'data');
 const TRANSCODE_DIR = join(DATA_DIR, 'hls');
 const FAVORITES_FILE = join(DATA_DIR, 'favorites.json');
-
-// Detect Linux hardware accel: prefer VAAPI, fall back to QSV, then software
-let linuxHwAccel = null;
-if (IS_LINUX) {
-  try {
-    // Check for VAAPI device
-    execSync('test -e /dev/dri/renderD128', { stdio: 'ignore' });
-    linuxHwAccel = 'vaapi';
-  } catch {
-    try {
-      execSync(`${FFMPEG} -hide_banner -init_hw_device qsv=hw -filter_hw_device hw -f lavfi -i nullsrc -frames:v 1 -c:v h264_qsv -f null - 2>/dev/null`, { stdio: 'ignore' });
-      linuxHwAccel = 'qsv';
-    } catch {
-      // No hardware accel available
-    }
-  }
-}
-
-function getHwAccelInputArgs() {
-  if (!IS_LINUX || !linuxHwAccel) return [];
-  if (linuxHwAccel === 'vaapi') {
-    return ['-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128', '-hwaccel_output_format', 'vaapi'];
-  }
-  if (linuxHwAccel === 'qsv') {
-    return ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'];
-  }
-  return [];
-}
-
-function getVideoEncodeArgs() {
-  if (IS_LINUX && linuxHwAccel === 'vaapi') {
-    return [
-      '-c:v', 'h264_vaapi',
-      '-rc_mode', 'CQP', '-qp', '24',
-      '-profile:v', 'main', '-level', '4.0',
-      '-bf', '0',
-      // Suppress SEI insertion. The h264_vaapi AU header buffer is hardcoded
-      // at 8192 bytes; broadcast OTA sources can produce SEI payloads that
-      // exceed it (a53_cc + timing + recovery_point), causing
-      // "Access unit too large" encode failures. We can't pass CCs through
-      // an all-GPU pipeline anyway (see CC notes), so dropping SEI is free.
-      '-sei', '0',
-    ];
-  }
-  if (IS_LINUX && linuxHwAccel === 'qsv') {
-    return ['-c:v', 'h264_qsv', '-b:v', '4M', '-profile:v', 'main', '-level', '40'];
-  }
-  if (IS_LINUX) {
-    // Software fallback
-    return ['-c:v', 'libx264', '-b:v', '4M', '-profile:v', 'main', '-level', '4.0', '-preset', 'fast'];
-  }
-  return ['-c:v', 'h264_videotoolbox', '-b:v', '4M', '-profile:v', 'main', '-level', '4.0'];
-}
 
 function loadFavorites() {
   try {
@@ -197,6 +147,50 @@ app.post('/api/recording/:recordingId/stop', async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+
+// ---------- Local archive library ----------
+app.get('/api/library', (req, res) => {
+  res.json({ entries: getLibrary(), jobs: getArchiveJobs() });
+});
+
+app.post('/api/archive/:recordingId', (req, res) => {
+  try {
+    const job = enqueueArchive(req.params.recordingId, { manual: true });
+    res.json({ ok: true, job });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/library/:id', (req, res) => {
+  try {
+    deleteLibraryEntry(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Archived recordings are plain MP4s — express handles Range requests, so
+// the browser gets instant native seek with no transcode session at all.
+app.get('/library/video/:id', (req, res) => {
+  const entry = getLibraryEntry(req.params.id);
+  if (!entry) return res.status(404).send('Not in library');
+  res.sendFile(libraryFilePath(entry), (err) => {
+    if (err && !res.headersSent) res.status(err.status || 500).end();
+  });
+});
+
+app.get('/library/thumb/:id', (req, res) => {
+  const entry = getLibraryEntry(req.params.id);
+  const thumb = entry && libraryThumbPath(entry);
+  if (!thumb || !existsSync(thumb)) return res.status(404).send('No thumbnail');
+  // dotfiles:'allow' — thumbs live under the dot-directory .thumbs, which
+  // sendFile refuses by default
+  res.sendFile(thumb, { dotfiles: 'allow' }, (err) => {
+    if (err && !res.headersSent) res.status(err.status || 500).end();
+  });
 });
 
 app.post('/api/favorites', express.json(), (req, res) => {

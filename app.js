@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { login, getAccount, selectAccount } from './src/auth.js';
 import { discoverDevice, fetchChannels, fetchRecordings, fetchGuide, fetchSeriesIndex } from './src/tablo.js';
+import { initLibrary } from './src/library.js';
 import { startServer } from './src/server.js';
 
 const PORT = process.env.PORT || 8181;
@@ -46,6 +47,9 @@ async function main() {
 
   console.log('[app] Fetching series index...');
   await fetchSeriesIndex();
+
+  console.log('[app] Initializing local archive library...');
+  initLibrary();
 
   setInterval(async () => {
     try {

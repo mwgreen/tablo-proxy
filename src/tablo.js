@@ -114,6 +114,27 @@ export async function deviceRequest(method, path, body) {
   return res.json();
 }
 
+// Fetch a snapshot/poster image from the device as raw bytes. Best-effort:
+// returns null on any failure — thumbnails are nice-to-have, never fatal.
+export async function fetchDeviceImage(imageId) {
+  if (!deviceUrl || !imageId) return null;
+  const path = `/images/${imageId}`;
+  try {
+    const authHeaders = makeDeviceAuth('GET', path);
+    const res = await withRediscover(() => fetch(`${deviceUrl}${path}?lh`, {
+      headers: {
+        ...authHeaders,
+        'User-Agent': 'Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)',
+      },
+      signal: AbortSignal.timeout(DEVICE_TIMEOUT_MS),
+    }));
+    if (!res.ok) return null;
+    return Buffer.from(await res.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchChannels() {
   // Fetch channel list from local device (more reliable than cloud API)
   const paths = await deviceRequest('GET', '/guide/channels');

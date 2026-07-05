@@ -140,6 +140,58 @@
       animation: rec-pulse 1.5s ease-in-out infinite;
     }
 
+    /* Local-archive badges + actions */
+    .rec-saved-badge {
+      display: inline-block; font-size: 10px; font-weight: 700; color: #2ecc71;
+      background: rgba(46,204,113,0.14); padding: 2px 6px; border-radius: 4px;
+      margin-right: 7px; letter-spacing: 0.6px; vertical-align: 1px;
+    }
+    .rec-arch-badge {
+      display: inline-block; font-size: 10px; font-weight: 700; color: #f0b429;
+      background: rgba(240,180,41,0.14); padding: 2px 6px; border-radius: 4px;
+      margin-right: 7px; letter-spacing: 0.6px; vertical-align: 1px;
+    }
+    .rec-arch-badge.failed { color: var(--accent); background: var(--accent-soft); }
+    .rec-archive-btn {
+      color: var(--text-faint); font-size: 13px; cursor: pointer;
+      padding: 6px 8px; line-height: 1; border-radius: 6px;
+    }
+    .rec-archive-btn:hover { color: #2ecc71; background: var(--surface-3); }
+
+    /* Recordings view switcher (Date / Shows / A-Z) */
+    #rec-view-bar { display: flex; gap: 5px; padding: 9px 10px 5px; }
+    #rec-view-bar button {
+      flex: 1; background: var(--surface-2); border: none; color: var(--text-dim);
+      font-size: 12px; font-weight: 600; padding: 6px 0; border-radius: 6px; cursor: pointer;
+    }
+    #rec-view-bar button:hover { background: var(--surface-3); }
+    #rec-view-bar button.active { background: var(--accent-soft); color: var(--accent); }
+
+    /* Shows (grouped) view */
+    .rec-group-header {
+      padding: 10px 14px; cursor: pointer; font-weight: 700; font-size: 13.5px;
+      display: flex; align-items: center; gap: 8px;
+      border-left: 3px solid transparent;
+    }
+    .rec-group-header:hover { background: var(--surface-2); }
+    .rec-group-header .chev {
+      font-size: 9px; color: var(--text-faint); transition: transform 0.15s;
+      flex-shrink: 0;
+    }
+    .rec-group.open .chev { transform: rotate(90deg); }
+    .rec-group-header .g-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rec-group-header .count { color: var(--text-faint); font-weight: 600; font-size: 11px; white-space: nowrap; }
+    .rec-group .rec-group-items { display: none; }
+    .rec-group.open .rec-group-items { display: block; }
+    .rec-group .rec-group-items.force-open { display: block; }
+    .rec-group .recording-item { padding-left: 26px; }
+
+    /* A-Z view letter headers */
+    .rec-letter {
+      padding: 8px 14px 3px; font-size: 11px; font-weight: 800; color: var(--text-faint);
+      text-transform: uppercase; letter-spacing: 1px;
+    }
+
     /* ---------------- Player area ---------------- */
     .player-area {
       flex: 1; display: flex; background: #000; position: relative; min-width: 0;
@@ -508,7 +560,7 @@
   <header>
     <div class="brand">
       <h1>Tablo</h1>
-      <span class="build">build 15</span>
+      <span class="build">build 16</span>
     </div>
     <nav>
       <button id="btn-live" class="active" onclick="showTab('live')">Live TV</button>
@@ -524,6 +576,11 @@
         <button class="gear-btn" onclick="openChannelPicker()" title="Edit channels">&#9881;</button>
       </div>
       <div id="channel-list"></div>
+      <div id="rec-view-bar" style="display:none">
+        <button id="rv-date" onclick="setRecView('date')">Date</button>
+        <button id="rv-shows" onclick="setRecView('shows')">Shows</button>
+        <button id="rv-az" onclick="setRecView('az')">A&ndash;Z</button>
+      </div>
       <div id="recording-list" style="display:none"></div>
     </div>
     <div class="player-area" id="playerArea">
@@ -625,6 +682,11 @@
   <script>
     let channels = [];
     let recordings = [];
+    let library = [];      // local archived copies (from /api/library)
+    let archiveJobs = [];  // in-flight archive queue state
+    let isLocal = false;   // current playback is a local MP4 (native seek, no session)
+    let recView = localStorage.getItem('recView') || 'date';  // date | shows | az
+    const expandedShows = new Set();  // open groups in the Shows view (session only)
     let guideData = {};
     let currentTab = 'live';
     let hls = null;
@@ -716,13 +778,14 @@
 
     async function init() {
       try {
-        const [chRes, recRes, guideRes, favRes, seriesRes, tunerRes] = await Promise.all([
+        const [chRes, recRes, guideRes, favRes, seriesRes, tunerRes, libRes] = await Promise.all([
           fetch('/api/channels'),
           fetch('/api/recordings'),
           fetch('/api/guide'),
           fetch('/api/favorites'),
           fetch('/api/series'),
           fetch('/api/tuners'),
+          fetch('/api/library'),
         ]);
         channels = await chRes.json();
         recordings = await recRes.json();
@@ -731,6 +794,9 @@
         seriesIndex = await seriesRes.json();
         const tuners = await tunerRes.json().catch(() => []);
         tunerStatus = Array.isArray(tuners) ? tuners : [];
+        const lib = await libRes.json().catch(() => ({}));
+        library = lib.entries || [];
+        archiveJobs = lib.jobs || [];
       } catch (e) {
         showError('Failed to load data: ' + e.message);
       }
@@ -742,11 +808,8 @@
         const saved = JSON.parse(localStorage.getItem('watchState') || '{}');
         if (saved.tab) showTab(saved.tab);
         if (saved.recordingId) {
-          const rec = recordings.find(r => String(r.id) === String(saved.recordingId));
-          if (rec) {
-            const el = document.querySelector(`.recording-item[data-id="${saved.recordingId}"]`);
-            playRecording(saved.recordingId, rec.duration, el || document.createElement('div'));
-          }
+          const el = document.querySelector(`.recording-item[data-id="${saved.recordingId}"]`);
+          playItem(saved.recordingId, el);
         } else if (saved.channelId) {
           const el = document.querySelector(`.channel-item[data-id="${saved.channelId}"]`);
           if (el) playChannel(saved.channelId, el);
@@ -777,49 +840,165 @@
       }).join('');
     }
 
+    // ---------- Merged recordings model ----------
+    // One list combining what's on the Tablo and what's archived locally.
+    // Items are keyed by the Tablo recording id (the local copy keeps the id
+    // after the Tablo copy is deleted, so resume positions carry over).
+    function mergedRecordings() {
+      const libById = new Map(library.map(l => [String(l.id), l]));
+      const items = recordings.map(r => ({ id: String(r.id), rec: r, lib: libById.get(String(r.id)) || null }));
+      const seen = new Set(items.map(i => i.id));
+      for (const l of library) {
+        if (!seen.has(String(l.id))) items.push({ id: String(l.id), rec: null, lib: l });
+      }
+      return items;
+    }
+
+    function jobFor(id) {
+      return archiveJobs.find(j => String(j.id) === String(id)) || null;
+    }
+    function jobActive(job) {
+      return !!job && (job.status === 'queued' || job.status === 'transcoding' || job.status === 'verifying');
+    }
+
+    // Sort key that ignores leading articles so "The Rookie" files under R
+    function titleKey(t) {
+      return String(t || '').replace(/^(the|a|an)\s+/i, '').toLowerCase();
+    }
+    function byDateDesc(a, b) {
+      return new Date((b.rec || b.lib).date || 0) - new Date((a.rec || a.lib).date || 0);
+    }
+
+    function renderRecItem(it) {
+      const rec = it.rec, lib = it.lib;
+      const src = rec || lib;
+      const now = Date.now();
+      const inProgress = rec ? isInProgress(rec, now) : false;
+      const effDur = rec ? effectiveDuration(rec) : (lib.duration || 0);
+      // Date AND time: repeated captures of the same episode (record, stop,
+      // record again) are otherwise indistinguishable in the list.
+      const d = src.date ? new Date(src.date) : null;
+      const date = d ? d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+      const dur = effDur ? Math.round(effDur / 60) + ' min' : '';
+      const isPartial = rec && rec.state && rec.state !== 'recording' && rec.recordedDuration && rec.duration && rec.recordedDuration < rec.duration * 0.85;
+      const resume = getResumePosition(it.id);
+      const hasResume = resume > 10 && effDur && resume < effDur - 30;
+      const size = lib && lib.size ? (lib.size >= 1e9 ? (lib.size / 1e9).toFixed(1) + ' GB' : Math.round(lib.size / 1e6) + ' MB') : '';
+      const meta = [src.channel, date, dur, isPartial ? 'partial' : '', rec && rec.state === 'failed' ? 'failed' : '', size]
+        .filter(Boolean).join(' · ');
+      const epInfo = src.seasonNumber && src.episodeNumber
+        ? `S${src.seasonNumber}E${src.episodeNumber}${src.episode ? ': ' + src.episode : ''}`
+        : (src.episode || '');
+      const search = `${src.title} ${src.episode || ''}`.toLowerCase();
+
+      const job = jobFor(it.id);
+      let badges = '';
+      if (inProgress) badges += '<span class="rec-live-badge" title="Recording now">REC</span>';
+      if (lib) badges += '<span class="rec-saved-badge" title="Saved on this machine">SAVED</span>';
+      else if (jobActive(job)) {
+        const label = job.status === 'queued' ? 'QUEUED'
+          : job.status === 'verifying' ? 'VERIFYING'
+          : 'SAVING ' + Math.round((job.progress || 0) * 100) + '%';
+        badges += `<span class="rec-arch-badge">${label}</span>`;
+      } else if (job && job.status === 'failed') {
+        badges += `<span class="rec-arch-badge failed" title="${escAttr(job.error || '')}">SAVE FAILED</span>`;
+      }
+
+      // For in-progress recordings, show a Stop button (■) next to the X
+      // delete. Stop ends the capture but keeps the partial file; X
+      // deletes everything (including any partial).
+      const stopBtn = inProgress
+        ? `<span class="rec-stop-btn" onclick="stopRec('${it.id}', event)" title="Stop recording (keep partial)">&#9632;</span>`
+        : '';
+      const archBtn = rec && !inProgress && !lib && !jobActive(job)
+        ? `<span class="rec-archive-btn" onclick="archiveRec('${it.id}', event)" title="Save a copy on this machine">&#10515;</span>`
+        : '';
+      const activeCls = String(currentRecordingId) === it.id ? ' active' : '';
+
+      return `<div class="recording-item${activeCls}" data-id="${it.id}" data-search="${esc(search)}" data-duration="${effDur}" onclick="playItem('${it.id}', this)">
+        <div class="rec-actions">${stopBtn}${archBtn}<span class="rec-delete-btn" onclick="recDelete('${it.id}', event)" title="Delete recording">&#10005;</span></div>
+        <div class="recording-title">${badges}${esc(src.title)}</div>
+        ${epInfo ? `<div class="recording-episode">${esc(epInfo)}</div>` : ''}
+        ${meta ? `<div class="recording-meta">${esc(meta)}</div>` : ''}
+        ${hasResume ? `<div class="resume-bar" title="Resume at ${fmt(resume)}"><i style="width:${Math.min(100, (resume / effDur) * 100)}%"></i></div>` : ''}
+      </div>`;
+    }
+
+    function setRecView(view) {
+      recView = view;
+      localStorage.setItem('recView', view);
+      renderRecordings();
+    }
+
+    function toggleShowGroup(headerEl) {
+      const group = headerEl.closest('.rec-group');
+      const key = group.dataset.key;
+      if (group.classList.toggle('open')) expandedShows.add(key);
+      else expandedShows.delete(key);
+    }
+
     function renderRecordings() {
       const list = document.getElementById('recording-list');
       const now = Date.now();
-      // Sort in-progress recordings to the top so they're easy to find
-      const sorted = recordings.slice().sort((a, b) => {
-        const aLive = isInProgress(a, now) ? 1 : 0;
-        const bLive = isInProgress(b, now) ? 1 : 0;
-        if (aLive !== bLive) return bLive - aLive;
-        return 0;
-      });
-      list.innerHTML = sorted.map(rec => {
-        // Date AND time: repeated captures of the same episode (record, stop,
-        // record again) are otherwise indistinguishable in the list.
-        const d = rec.date ? new Date(rec.date) : null;
-        const date = d ? d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
-        const effDur = effectiveDuration(rec);
-        const dur = effDur ? Math.round(effDur / 60) + ' min' : '';
-        const isPartial = rec.state && rec.state !== 'recording' && rec.recordedDuration && rec.duration && rec.recordedDuration < rec.duration * 0.85;
-        const resume = getResumePosition(rec.id);
-        const hasResume = resume > 10 && effDur && resume < effDur - 30;
-        const meta = [rec.channel, date, dur, isPartial ? 'partial' : '', rec.state === 'failed' ? 'failed' : ''].filter(Boolean).join(' · ');
-        const epInfo = rec.seasonNumber && rec.episodeNumber
-          ? `S${rec.seasonNumber}E${rec.episodeNumber}: ${rec.episode}`
-          : rec.episode;
-        const search = `${rec.title} ${rec.episode}`.toLowerCase();
-        const inProgress = isInProgress(rec, now);
-        const liveBadge = inProgress
-          ? '<span class="rec-live-badge" title="Recording now">REC</span>'
-          : '';
-        // For in-progress recordings, show a Stop button (■) next to the X
-        // delete. Stop ends the capture but keeps the partial file; X
-        // deletes everything (including any partial).
-        const stopBtn = inProgress
-          ? `<span class="rec-stop-btn" onclick="stopRec('${rec.id}', event)" title="Stop recording (keep partial)">&#9632;</span>`
-          : '';
-        return `<div class="recording-item" data-id="${rec.id}" data-search="${esc(search)}" data-duration="${effDur}" onclick="playRecording('${rec.id}', ${effDur}, this)">
-          <div class="rec-actions">${stopBtn}<span class="rec-delete-btn" onclick="deleteRec('${rec.id}', event)" title="Delete recording">&#10005;</span></div>
-          <div class="recording-title">${liveBadge}${esc(rec.title)}</div>
-          ${epInfo ? `<div class="recording-episode">${esc(epInfo)}</div>` : ''}
-          ${meta ? `<div class="recording-meta">${esc(meta)}</div>` : ''}
-          ${hasResume ? `<div class="resume-bar" title="Resume at ${fmt(resume)}"><i style="width:${Math.min(100, (resume / effDur) * 100)}%"></i></div>` : ''}
-        </div>`;
-      }).join('');
+      for (const v of ['date', 'shows', 'az']) {
+        const btn = document.getElementById('rv-' + v);
+        if (btn) btn.classList.toggle('active', recView === v);
+      }
+
+      const items = mergedRecordings();
+      let html = '';
+
+      if (recView === 'shows') {
+        // Rolled up by show, alphabetical; expand a show to see its episodes
+        const groups = new Map();
+        for (const it of items) {
+          const key = titleKey((it.rec || it.lib).title);
+          if (!groups.has(key)) groups.set(key, { title: (it.rec || it.lib).title || 'Unknown', items: [] });
+          groups.get(key).items.push(it);
+        }
+        const sorted = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+        for (const [key, g] of sorted) {
+          g.items.sort(byDateDesc);
+          const savedCount = g.items.filter(i => i.lib).length;
+          const n = g.items.length;
+          const anyLive = g.items.some(i => i.rec && isInProgress(i.rec, now));
+          const open = expandedShows.has(key);
+          html += `<div class="rec-group${open ? ' open' : ''}" data-key="${escAttr(key)}">
+            <div class="rec-group-header" onclick="toggleShowGroup(this)">
+              <span class="chev">&#9654;</span>
+              <span class="g-title">${anyLive ? '<span class="rec-live-badge" title="Recording now">REC</span>' : ''}${esc(g.title)}</span>
+              <span class="count">${n} ep${n === 1 ? '' : 's'}${savedCount ? ` · ${savedCount} saved` : ''}</span>
+            </div>
+            <div class="rec-group-items">${g.items.map(renderRecItem).join('')}</div>
+          </div>`;
+        }
+      } else if (recView === 'az') {
+        // Flat alphabetical with letter headers
+        const sorted = items.slice().sort((a, b) =>
+          titleKey((a.rec || a.lib).title).localeCompare(titleKey((b.rec || b.lib).title)) || byDateDesc(a, b));
+        let lastLetter = null;
+        for (const it of sorted) {
+          const first = (titleKey((it.rec || it.lib).title)[0] || '#').toUpperCase();
+          const letter = /[A-Z]/.test(first) ? first : '#';
+          if (letter !== lastLetter) {
+            html += `<div class="rec-letter">${letter}</div>`;
+            lastLetter = letter;
+          }
+          html += renderRecItem(it);
+        }
+      } else {
+        // Date view: in-progress first, then newest first
+        const sorted = items.slice().sort((a, b) => {
+          const aLive = a.rec && isInProgress(a.rec, now) ? 1 : 0;
+          const bLive = b.rec && isInProgress(b.rec, now) ? 1 : 0;
+          if (aLive !== bLive) return bLive - aLive;
+          return byDateDesc(a, b);
+        });
+        html = sorted.map(renderRecItem).join('');
+      }
+
+      list.innerHTML = html;
+      if (document.getElementById('search').value) filterList();
     }
 
     function isInProgress(rec, now) {
@@ -874,10 +1053,19 @@
         guideContainer.style.display = 'none';
         document.getElementById('channel-list').style.display = tab === 'live' ? 'block' : 'none';
         document.getElementById('recording-list').style.display = tab === 'recordings' ? 'block' : 'none';
+        document.getElementById('rec-view-bar').style.display = tab === 'recordings' ? 'flex' : 'none';
         document.getElementById('search').value = '';
         filterList();
         if (tab === 'recordings') refreshRecordings();
       }
+    }
+
+    async function refreshLibrary() {
+      try {
+        const data = await (await fetch('/api/library')).json();
+        library = data.entries || [];
+        archiveJobs = data.jobs || [];
+      } catch (e) {}
     }
 
     async function refreshRecordings() {
@@ -885,19 +1073,49 @@
         await fetch('/api/refresh', { method: 'POST' });
         const res = await fetch('/api/recordings');
         recordings = await res.json();
+        await refreshLibrary();
         renderRecordings();
       } catch (e) {
         console.warn('Failed to refresh recordings:', e);
       }
     }
 
+    // While an archive is running (or the tab is open), keep the SAVING %
+    // badge and SAVED flips current without a manual refresh.
+    setInterval(async () => {
+      const active = archiveJobs.some(jobActive);
+      if (!active && currentTab !== 'recordings') return;
+      const before = JSON.stringify([library.length, archiveJobs]);
+      await refreshLibrary();
+      if (currentTab === 'recordings' && JSON.stringify([library.length, archiveJobs]) !== before) {
+        renderRecordings();
+      }
+    }, 5000);
+
     function filterList() {
       const q = document.getElementById('search').value.toLowerCase();
-      const listId = currentTab === 'live' ? 'channel-list' : 'recording-list';
-      const items = document.getElementById(listId).children;
-      for (const item of items) {
+      if (currentTab === 'live') {
+        for (const item of document.getElementById('channel-list').children) {
+          const text = item.getAttribute('data-search') || '';
+          item.style.display = text.includes(q) ? '' : 'none';
+        }
+        return;
+      }
+      const list = document.getElementById('recording-list');
+      for (const item of list.querySelectorAll('.recording-item')) {
         const text = item.getAttribute('data-search') || '';
         item.style.display = text.includes(q) ? '' : 'none';
+      }
+      // A-Z letter headers don't correspond to the filtered set — hide while searching
+      for (const h of list.querySelectorAll('.rec-letter')) {
+        h.style.display = q ? 'none' : '';
+      }
+      // Shows view: hide groups with no matches; force matching groups open
+      // during a search so hits inside collapsed shows are visible.
+      for (const g of list.querySelectorAll('.rec-group')) {
+        const any = [...g.querySelectorAll('.recording-item')].some(i => i.style.display !== 'none');
+        g.style.display = any ? '' : 'none';
+        g.querySelector('.rec-group-items').classList.toggle('force-open', !!q);
       }
     }
 
@@ -910,6 +1128,7 @@
         const [recsRes, tunRes] = await Promise.all([
           fetch('/api/recordings'),
           fetch('/api/tuners'),
+          refreshLibrary(),
         ]);
         const newRecs = await recsRes.json();
         recordings.length = 0;
@@ -937,14 +1156,18 @@
       if (event) event.stopPropagation();
       const rec = recordings.find(r => String(r.id) === String(recordingId));
       const name = rec ? `${rec.title}${rec.episode ? ' - ' + rec.episode : ''}` : 'this recording';
-      const watchingIt = String(currentRecordingId) === String(recordingId);
+      const hasLocal = library.some(l => String(l.id) === String(recordingId));
+      // "Watching it" only matters if playback is coming FROM the Tablo — a
+      // local copy keeps playing (and survives) after the Tablo copy is gone.
+      const watchingIt = !isLocal && String(currentRecordingId) === String(recordingId);
+      const scope = hasLocal ? ' from the Tablo? (Your saved copy stays.)' : '?';
       const msg = watchingIt
-        ? `Delete ${name}? You're watching it — playback will stop.`
-        : `Delete ${name}?`;
+        ? `Delete ${name}${scope} You're watching it — playback will stop.`
+        : `Delete ${name}${scope}`;
       if (!confirm(msg)) return;
       try {
         await fetch('/api/recording/' + recordingId, { method: 'DELETE' });
-        localStorage.removeItem('resume_' + recordingId);
+        if (!hasLocal) localStorage.removeItem('resume_' + recordingId);
         if (watchingIt) stopPlayback();
         // Optimistic local update — drop the recording from our list and
         // free its tuner slot. Tablo's tuner state lags the DELETE by a
@@ -987,6 +1210,147 @@
       } catch (e) {
         console.error('Stop failed:', e);
       }
+    }
+
+    // ---------- Local archive actions ----------
+    async function archiveRec(recordingId, event) {
+      if (event) event.stopPropagation();
+      try {
+        const res = await fetch('/api/archive/' + recordingId, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { showError(data.error); return; }
+        archiveJobs = archiveJobs.filter(j => String(j.id) !== String(recordingId)).concat([data.job]);
+        showToast('Saving to this machine…');
+        if (currentTab === 'recordings') renderRecordings();
+      } catch (e) {
+        showError('Archive failed: ' + e.message);
+      }
+    }
+
+    async function deleteLocal(recordingId, event) {
+      if (event) event.stopPropagation();
+      const lib = library.find(l => String(l.id) === String(recordingId));
+      if (!lib) return;
+      const name = `${lib.title}${lib.episode ? ' - ' + lib.episode : ''}`;
+      const onTablo = recordings.some(r => String(r.id) === String(recordingId));
+      const watchingIt = isLocal && String(currentRecordingId) === String(recordingId);
+      let msg = `Delete the saved copy of ${name}?${onTablo ? ' (The Tablo copy stays.)' : ' This is the ONLY copy.'}`;
+      if (watchingIt) msg += ' You\'re watching it — playback will stop.';
+      if (!confirm(msg)) return;
+      try {
+        const res = await fetch('/api/library/' + recordingId, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.error) { showError(data.error); return; }
+        library = library.filter(l => String(l.id) !== String(recordingId));
+        archiveJobs = archiveJobs.filter(j => String(j.id) !== String(recordingId));
+        if (!onTablo) localStorage.removeItem('resume_' + recordingId);
+        if (watchingIt) stopPlayback();
+        if (currentTab === 'recordings') renderRecordings();
+      } catch (e) {
+        showError('Delete failed: ' + e.message);
+      }
+    }
+
+    async function deleteBoth(recordingId) {
+      const it = mergedRecordings().find(i => i.id === String(recordingId));
+      const src = it && (it.rec || it.lib);
+      const name = src ? `${src.title}${src.episode ? ' - ' + src.episode : ''}` : 'this recording';
+      const watchingIt = String(currentRecordingId) === String(recordingId);
+      if (!confirm(`Delete ${name} from the Tablo AND this machine?${watchingIt ? ' You\'re watching it — playback will stop.' : ''}`)) return;
+      try {
+        await fetch('/api/library/' + recordingId, { method: 'DELETE' });
+        library = library.filter(l => String(l.id) !== String(recordingId));
+        archiveJobs = archiveJobs.filter(j => String(j.id) !== String(recordingId));
+      } catch (e) {}
+      try {
+        await fetch('/api/recording/' + recordingId, { method: 'DELETE' });
+        recordings = recordings.filter(r => String(r.id) !== String(recordingId));
+        dropTunerForRecording(it?.rec?.path);
+      } catch (e) {}
+      localStorage.removeItem('resume_' + recordingId);
+      if (watchingIt) stopPlayback();
+      if (currentTab === 'recordings') renderRecordings();
+      setTimeout(refreshAll, 3000);
+    }
+
+    // The X button: with only one copy it's a straight delete; with both a
+    // Tablo and a saved copy, ask which one.
+    function recDelete(recordingId, event) {
+      if (event) event.stopPropagation();
+      const it = mergedRecordings().find(i => i.id === String(recordingId));
+      if (!it) return;
+      if (it.rec && it.lib) {
+        closeRecMenu();
+        const menu = document.createElement('div');
+        menu.className = 'rec-menu';
+        menu.id = 'recMenu';
+        menu.innerHTML = `
+          <button onclick="closeRecMenu(); deleteRec('${it.id}')">Delete from Tablo (keep saved copy)</button>
+          <button class="danger" onclick="closeRecMenu(); deleteLocal('${it.id}')">Delete saved copy (keep on Tablo)</button>
+          <button class="danger" onclick="closeRecMenu(); deleteBoth('${it.id}')">Delete both</button>`;
+        menu.style.left = Math.min(event.clientX, window.innerWidth - 260) + 'px';
+        menu.style.top = Math.min(event.clientY, window.innerHeight - 160) + 'px';
+        document.body.appendChild(menu);
+        setTimeout(() => document.addEventListener('click', closeRecMenu), 0);
+      } else if (it.lib) {
+        deleteLocal(recordingId, event);
+      } else {
+        deleteRec(recordingId, event);
+      }
+    }
+
+    // Play a merged item: prefer the local MP4 (instant native seek, no
+    // transcode) unless the capture is still in progress — live viewing needs
+    // the Tablo's growing stream.
+    function playItem(recordingId, el) {
+      const it = mergedRecordings().find(i => i.id === String(recordingId));
+      if (!it) return;
+      const inProg = it.rec && isInProgress(it.rec, Date.now());
+      if (it.lib && !inProg) return playLocalRecording(recordingId, el);
+      if (it.rec) return playRecording(recordingId, effectiveDuration(it.rec), el || document.createElement('div'));
+    }
+
+    async function playLocalRecording(recordingId, el) {
+      const lib = library.find(l => String(l.id) === String(recordingId));
+      if (!lib) return;
+      clearActive();
+      if (el) el.classList.add('active');
+      stopLiveStatusPoll();
+      currentRecordingId = String(recordingId);
+      currentChannelId = null;
+      isLive = false;
+      liveRecording = null;
+      currentShowId = null;
+      isLocal = true;
+      totalDuration = lib.duration || 0;
+      serverOffset = 0;
+      const epInfo = lib.seasonNumber && lib.episodeNumber
+        ? `S${lib.seasonNumber}E${lib.episodeNumber}: ${lib.episode}`
+        : lib.episode;
+      setNowPlaying(lib.title, [epInfo, lib.channel].filter(Boolean).join(' · '));
+      updateRecBtn();
+
+      document.getElementById('status').classList.add('hidden');
+      setLoading('Loading saved recording...');
+      clearError();
+      releaseSession();
+      const gen = ++playGen;
+      const video = freshVideo();
+      const resume = getResumePosition(recordingId);
+      video.src = `/library/video/${recordingId}`;
+      video.addEventListener('loadedmetadata', () => {
+        if (gen !== playGen) return;
+        if (!totalDuration && isFinite(video.duration)) totalDuration = video.duration;
+        if (resume > 10 && resume < totalDuration - 30) video.currentTime = resume;
+        onStreamReady();
+        document.getElementById('liveBtn').classList.add('hidden');
+        video.play().catch(() => {});
+      }, { once: true });
+      video.addEventListener('error', () => {
+        if (gen !== playGen) return;
+        hideLoading();
+        showError('Failed to play saved recording');
+      });
     }
 
     function isChannelRecording(channelId) {
@@ -1202,6 +1566,7 @@
       if (el) el.classList.add('active');
       currentChannelId = channelId;
       isLive = true;
+      isLocal = false;
       liveRecording = null;
       currentShowId = null;
       recPending = false;
@@ -1296,6 +1661,7 @@
       totalDuration = duration;
       currentRecordingId = recordingId;
       currentShowId = null;
+      isLocal = false;
       updateRecBtn();
 
       // Detect if this recording is currently in progress (device state)
@@ -1447,6 +1813,7 @@
       currentRecordingId = null;
       currentChannelId = null;
       isLive = false;
+      isLocal = false;
       liveRecording = null;
       currentShowId = null;
       freshVideo();   // blank element, drops src and any hls.js instance
@@ -1692,6 +2059,12 @@
     function seekTo(delta) {
       showUI();
       const v = document.getElementById('video');
+      if (isLocal) {
+        // Local MP4: the browser seeks anywhere natively — no server round-trip
+        const dur = isFinite(v.duration) ? v.duration : (totalDuration || Infinity);
+        v.currentTime = Math.max(0, Math.min(dur - 0.25, (v.currentTime || 0) + delta));
+        return;
+      }
       const currentAbsolute = serverOffset + (v.currentTime || 0);
 
       let maxPos = totalDuration || Infinity;
@@ -2032,6 +2405,12 @@
 
     function commitSeek(pct) {
       const t = getTimeline();
+      if (isLocal) {
+        // Local MP4: direct native seek
+        const dur = isFinite(video.duration) ? video.duration : t.end;
+        video.currentTime = Math.max(0, Math.min(dur - 0.25, pct * t.end));
+        return;
+      }
       if (t.mode === 'channel') {
         // Live channel: seek within the DVR window (the seekable range).
         video.currentTime = t.start + pct * Math.max(0, t.end - t.start);

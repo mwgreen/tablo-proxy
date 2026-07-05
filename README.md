@@ -6,6 +6,8 @@ A web-based proxy for Tablo TV (4th generation) that lets you watch live TV and 
 
 - **Live TV** — watch any OTA channel via your Tablo
 - **Recordings** — play back recorded shows with full seek support
+- **Local archive** — finished recordings are automatically transcoded once (hardware) to H.264 MP4 on local disk, in a Plex/Jellyfin-compatible layout; archived copies play as static files with instant native seek and no per-viewer transcode
+- **Recordings views** — flat by date, rolled up by show, or alphabetical
 - **TV Guide (EPG)** — browse what's on now and upcoming
 - **Channel favorites** — filter the channel list to only the channels you care about
 - **Seek bar** — server-side seek for recordings (FFmpeg restarts at the new offset)
@@ -63,6 +65,10 @@ http://localhost:9480/stream/recording/<recordingId>
 | `TABLO_PASSWORD` | (required) | Your Tablo account password |
 | `PORT` | `8181` | Server port |
 | `GUIDE_DAYS` | `2` | Days of guide data to fetch (1-7) |
+| `LIBRARY_DIR` | `/mnt/storage/tablo` | Where archived recordings (MP4 + metadata) are stored |
+| `AUTO_ARCHIVE` | `1` | Automatically archive finished Tablo recordings (`0` to disable) |
+| `AUTO_DELETE_FROM_TABLO` | `0` | Delete the Tablo copy after a verified archive (`1` to enable) |
+| `ARCHIVE_POLL_MINUTES` | `10` | How often to sweep the Tablo for new finished recordings |
 
 ## License
 
