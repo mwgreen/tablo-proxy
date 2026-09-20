@@ -15,7 +15,7 @@
 #      device get registered and any trust prompt is answered.
 #   4. Write ~/.config/tablo-tv/refresh.env:
 #        TEAM_ID=ABCDE12345          # Xcode > Settings > Accounts > Personal Team ID
-#        DEVICE_ID=<UDID>            # xcrun devicectl list devices
+#        DEVICE_IDS="<UDID> <UDID>"  # xcrun devicectl list devices (one or more, space-separated)
 #        MAX_AGE_DAYS=5              # optional (default 5)
 #        FORCE=0                     # optional, 1 = always rebuild
 set -u
@@ -23,7 +23,7 @@ set -o pipefail
 
 CONFIG="${HOME}/.config/tablo-tv/refresh.env"
 STATE_DIR="${HOME}/Library/Application Support/tablo-tv-refresh"
-STAMP="${STATE_DIR}/last-success"          # contains the git commit that was installed
+# Per-device stamps: ${STATE_DIR}/last-success.<UDID> holds the git commit installed there
 LOG="${STATE_DIR}/refresh.log"
 TVOS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_DIR="$(cd "${TVOS_DIR}/.." && pwd)"
@@ -47,7 +47,8 @@ fi
 # shellcheck disable=SC1090
 source "${CONFIG}"
 : "${TEAM_ID:?TEAM_ID not set in ${CONFIG}}"
-: "${DEVICE_ID:?DEVICE_ID not set in ${CONFIG}}"
+: "${DEVICE_IDS:=${DEVICE_ID:-}}"
+[ -n "${DEVICE_IDS}" ] || fail "DEVICE_IDS not set in ${CONFIG}"
 MAX_AGE_DAYS="${MAX_AGE_DAYS:-5}"
 FORCE="${FORCE:-0}"
 
@@ -66,33 +67,44 @@ if git merge-base --is-ancestor HEAD origin/main 2>/dev/null && [ "$(git rev-par
 fi
 SRC_HASH="$(git log -1 --format=%H -- tvos 2>/dev/null || echo unknown)"
 
-# --- Decide whether anything needs doing -------------------------------------
-if [ "${FORCE}" != "1" ] && [ -f "${STAMP}" ]; then
-  LAST_HASH="$(cat "${STAMP}")"
-  AGE_DAYS=$(( ( $(date +%s) - $(stat -f %m "${STAMP}") ) / 86400 ))
-  if [ "${LAST_HASH}" = "${SRC_HASH}" ] && [ "${AGE_DAYS}" -lt "${MAX_AGE_DAYS}" ]; then
-    echo "up to date (installed ${AGE_DAYS}d ago, source unchanged); nothing to do"
-    exit 0
+# --- Which devices need a refresh? -------------------------------------------
+# A device is due when its stamp is older than MAX_AGE_DAYS or was built from a
+# different tvos/ commit. Devices that aren't reachable right now are skipped
+# (not failed) and picked up on a later run.
+DUE=()
+for DEV in ${DEVICE_IDS}; do
+  STAMP="${STATE_DIR}/last-success.${DEV}"
+  if [ "${FORCE}" != "1" ] && [ -f "${STAMP}" ]; then
+    LAST_HASH="$(cat "${STAMP}")"
+    AGE_DAYS=$(( ( $(date +%s) - $(stat -f %m "${STAMP}") ) / 86400 ))
+    if [ "${LAST_HASH}" = "${SRC_HASH}" ] && [ "${AGE_DAYS}" -lt "${MAX_AGE_DAYS}" ]; then
+      echo "${DEV}: up to date (installed ${AGE_DAYS}d ago, source unchanged)"
+      continue
+    fi
+    echo "${DEV}: refresh due (age=${AGE_DAYS}d source_changed=$([ "${LAST_HASH}" != "${SRC_HASH}" ] && echo yes || echo no))"
+  else
+    echo "${DEV}: never installed (or FORCE=1)"
   fi
-  echo "refresh needed: age=${AGE_DAYS}d source_changed=$([ "${LAST_HASH}" != "${SRC_HASH}" ] && echo yes || echo no)"
-fi
-
-# --- Is the Apple TV reachable? ------------------------------------------------
-if ! xcrun devicectl list devices --hide-headers 2>/dev/null | grep -q "${DEVICE_ID}"; then
-  echo "Apple TV ${DEVICE_ID} not visible to devicectl; will retry next run"
+  if ! xcrun devicectl list devices --hide-headers 2>/dev/null | grep -q "${DEV}"; then
+    echo "${DEV}: not visible to devicectl; will retry next run"; continue
+  fi
+  if ! xcrun devicectl device info details --device "${DEV}" 2>/dev/null | grep -qi "connected"; then
+    echo "${DEV}: known but not connected (off? other network?); will retry next run"; continue
+  fi
+  DUE+=("${DEV}")
+done
+if [ ${#DUE[@]} -eq 0 ]; then
+  echo "nothing to do"
   exit 0
 fi
-if ! xcrun devicectl device info details --device "${DEVICE_ID}" 2>/dev/null | grep -qi "connected"; then
-  echo "Apple TV ${DEVICE_ID} known but not connected (off? other network?); will retry next run"
-  exit 0
-fi
+BUILD_DEV="${DUE[0]}"
 
 # --- Build with a freshly minted 7-day profile ---------------------------------
 cd "${TVOS_DIR}" || fail "tvos dir missing"
 xcodegen generate -q || fail "xcodegen generate failed"
 rm -rf "${DERIVED}/Build/Products"
 if ! xcodebuild -project "${SCHEME}.xcodeproj" -scheme "${SCHEME}" \
-     -destination "platform=tvOS,id=${DEVICE_ID}" \
+     -destination "platform=tvOS,id=${BUILD_DEV}" \
      -derivedDataPath "${DERIVED}" \
      -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
      DEVELOPMENT_TEAM="${TEAM_ID}" CODE_SIGN_STYLE=Automatic \
@@ -102,9 +114,21 @@ fi
 APP="$(find "${DERIVED}/Build/Products" -maxdepth 2 -name "${SCHEME}.app" | head -1)"
 [ -n "${APP}" ] || fail "built .app not found"
 
-# --- Install (replaces the app in place; its data survives) --------------------
-xcrun devicectl device install app --device "${DEVICE_ID}" "${APP}" || fail "install to Apple TV failed"
+# --- Install to every due device (replaces the app in place; its data survives)
+# The profile baked into this build covers all devices registered to the team,
+# so one build serves every Apple TV.
+FAILED=()
+for DEV in "${DUE[@]}"; do
+  if xcrun devicectl device install app --device "${DEV}" "${APP}"; then
+    echo "${SRC_HASH}" > "${STATE_DIR}/last-success.${DEV}"
+    echo "${DEV}: OK installed $(git -C "${REPO_DIR}" rev-parse --short HEAD)"
+  else
+    echo "${DEV}: install failed"
+    FAILED+=("${DEV}")
+  fi
+done
 
-echo "${SRC_HASH}" > "${STAMP}"
-echo "OK: installed $(git -C "${REPO_DIR}" rev-parse --short HEAD) at $(date '+%F %T')"
-notify "Reinstalled" "Fresh 7-day profile installed on the Apple TV"
+if [ ${#FAILED[@]} -gt 0 ]; then
+  fail "install failed on ${#FAILED[@]} device(s): ${FAILED[*]}"
+fi
+notify "Reinstalled" "Fresh 7-day profile on ${#DUE[@]} Apple TV(s)"

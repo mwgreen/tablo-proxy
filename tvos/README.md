@@ -33,13 +33,17 @@ One-time setup:
    and Run once on the Apple TV (registers the app ID + device, answers trust).
 4. Create `~/.config/tablo-tv/refresh.env`:
 
-       TEAM_ID=ABCDE12345     # Xcode > Settings > Accounts > your team's ID
-       DEVICE_ID=<UDID>       # from: xcrun devicectl list devices
+       TEAM_ID=ABCDE12345            # Xcode > Settings > Accounts > your team's ID
+       DEVICE_IDS="<UDID> <UDID>"    # from: xcrun devicectl list devices — one per Apple TV
 
 5. Install the agent:
 
        cp scripts/com.mwgreen.tablo-tv-refresh.plist ~/Library/LaunchAgents/
        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mwgreen.tablo-tv-refresh.plist
+
+Several Apple TVs: pair each one with Xcode once (step 2) and list all their
+UDIDs in `DEVICE_IDS`. One build covers them all; an Apple TV that's off during
+a run is skipped and caught up on a later one.
 
 Log: `~/Library/Application Support/tablo-tv-refresh/refresh.log`. Failures
 (usually Apple wanting you to sign in again) pop a macOS notification.
