@@ -1521,7 +1521,13 @@
         html += `<button class="danger" onclick="closeRecMenu(); stopRec('${escAttr(String(capturingRec.id))}')">Stop recording (keep partial)</button>`;
       } else if (airingDatetime) {
         const chArg = channelIdentifier ? `'${escAttr(channelIdentifier)}'` : 'null';
-        html += `<button onclick="doRecordAction('single', '${escAttr(showId)}', '${escAttr(airingDatetime)}', ${chArg})">Record this episode</button>`;
+        if (isAiringScheduled(airingDatetime, channelIdentifier)) {
+          // Already on the device's schedule (one-off or via the series rule):
+          // offer to drop just this airing.
+          html += `<button class="danger" onclick="doRecordAction('unsingle', '${escAttr(showId)}', '${escAttr(airingDatetime)}', ${chArg})">Don't record this episode</button>`;
+        } else {
+          html += `<button onclick="doRecordAction('single', '${escAttr(showId)}', '${escAttr(airingDatetime)}', ${chArg})">Record this episode</button>`;
+        }
       }
       if (isSeriesRec) {
         html += `<button class="danger" onclick="doRecordAction('cancel-series', '${escAttr(showId)}')">Cancel series recording</button>`;
@@ -1542,7 +1548,15 @@
       closeRecMenu();
       const entry = seriesIndex[showId];
       try {
-        if (action === 'single') {
+        if (action === 'unsingle') {
+          const res = await fetch('/api/record-airing', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ showId, datetime, channelIdentifier, schedule: false })
+          });
+          const data = await res.json();
+          if (data.error) { showError(data.error); return; }
+          showToast('Recording canceled');
+        } else if (action === 'single') {
           const res = await fetch('/api/record-airing', { method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ showId, datetime, channelIdentifier })
