@@ -8,6 +8,7 @@ import {
   startWatch, startRecordingWatch, fetchChannels, fetchRecordings, fetchGuide, fetchSeriesIndex,
   resolveChannelId, getSeriesIndex, scheduleSeries, unscheduleSeries, getScheduledSeries,
   getTunerStatus, scheduleAiring, deleteRecording, stopRecording, getRecordingStatus,
+  fetchScheduledAirings,
 } from './tablo.js';
 import { IS_LINUX, FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs } from './encode.js';
 import {
@@ -91,6 +92,18 @@ app.get('/api/favorites', (req, res) => res.json(loadFavorites()));
 // Recording schedule
 app.get('/api/series', (req, res) => res.json(getSeriesIndex()));
 app.get('/api/scheduled', (req, res) => res.json(getScheduledSeries()));
+
+// Per-airing schedule state straight from the device. A series rule alone
+// doesn't mean a given airing will record: Tablo skips duplicates (same
+// episode airing again on another channel/time) and conflicts. The UI uses
+// this to mark only the airings that will actually be captured.
+app.get('/api/scheduled-airings', async (req, res) => {
+  try {
+    res.json(await fetchScheduledAirings());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.post('/api/record/:showId', express.json(), async (req, res) => {
   try {
@@ -259,32 +272,62 @@ app.get('/stream/hls/recording/:recordingId', async (req, res) => {
 });
 
 // Seek: restart transcode from a given offset
+// Seeks are serialized per session and superseded by newer ones. Without
+// this, two rapid seeks race: the second's cleanupSession() finds no session
+// yet (the first is still awaiting computeSeekArgs), so both ffmpegs end up
+// alive and writing seg0/seg1/... into the same directory — the playlist
+// then flips between two positions and playback "jumps back".
+const seekLocks = new Map();   // sessionId -> Promise (tail of the chain)
+const seekGens = new Map();    // sessionId -> latest seek generation
+
 app.post('/api/seek/:sessionId', express.json(), async (req, res) => {
-  const session = sessions.get(req.params.sessionId);
-  if (!session) {
+  const sid = req.params.sessionId;
+  if (!sessions.has(sid)) {
     return res.status(404).json({ error: 'Session not found' });
   }
 
   const offset = parseFloat(req.body.offset) || 0;
-  const sourceUrl = session.sourceUrl;
-  const sid = req.params.sessionId;
-  const live = session.live;
+  const gen = (seekGens.get(sid) || 0) + 1;
+  seekGens.set(sid, gen);
 
-  cleanupSession(sid);
+  const prev = seekLocks.get(sid) || Promise.resolve();
+  const run = prev.catch(() => {}).then(async () => {
+    // A newer seek arrived while we were queued: don't spawn anything.
+    if (seekGens.get(sid) !== gen) return { superseded: true };
+    const session = sessions.get(sid);
+    if (!session) return { gone: true };
+    const { sourceUrl, live } = session;
 
-  // Restart transcode reusing same session ID
-  const dir = join(TRANSCODE_DIR, sid);
-  mkdirSync(dir, { recursive: true });
-  await startTranscodeWithId(sid, dir, sourceUrl, offset, live);
+    cleanupSession(sid);
 
-  // Wait for first segment before returning
-  const seg0Path = join(dir, 'seg0.m4s');
-  for (let i = 0; i < 300; i++) {
-    if (existsSync(seg0Path)) break;
-    await new Promise(r => setTimeout(r, 100));
+    // Restart transcode reusing same session ID
+    const dir = join(TRANSCODE_DIR, sid);
+    mkdirSync(dir, { recursive: true });
+    await startTranscodeWithId(sid, dir, sourceUrl, offset, live);
+
+    // Wait for first segment before returning (bail if superseded meanwhile)
+    const seg0Path = join(dir, 'seg0.m4s');
+    for (let i = 0; i < 300; i++) {
+      if (existsSync(seg0Path)) break;
+      if (seekGens.get(sid) !== gen) return { superseded: true };
+      await new Promise(r => setTimeout(r, 100));
+    }
+    console.log(`[transcode] Session ${sid} seeked to ${offset}s`);
+    return { ok: true };
+  });
+  seekLocks.set(sid, run);
+
+  let result;
+  try {
+    result = await run;
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  } finally {
+    if (seekLocks.get(sid) === run) seekLocks.delete(sid);
   }
+  if (result.superseded) return res.status(409).json({ error: 'Seek superseded by a newer seek', superseded: true });
+  if (result.gone) return res.status(404).json({ error: 'Session not found' });
 
-  console.log(`[transcode] Session ${sid} seeked to ${offset}s`);
   // Cache-bust the playlist URL so hls.js's internal fragment cache treats
   // the post-seek stream as a fresh source. Without this, hls.js may reuse
   // already-loaded seg0/seg1/etc. (same URL, different content) and replay

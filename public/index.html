@@ -465,6 +465,7 @@
     }
     .guide-rec-btn:hover { color: var(--accent); }
     .guide-rec-btn.recording { color: var(--accent); }
+    .guide-rec-btn.skipped { color: #e0a030; }
 
     /* ---------------- Rec menu ---------------- */
     .rec-menu {
@@ -701,6 +702,25 @@
     let seriesIndex = {}; // cloudShowId -> { path, title, schedule }
     let currentShowId = null; // cloud show ID of what's playing live
     let tunerStatus = []; // active tuner info from device
+    let scheduledAirings = []; // per-airing schedule state from the device (what will actually record)
+
+    async function loadScheduledAirings() {
+      try {
+        const r = await (await fetch('/api/scheduled-airings')).json();
+        if (Array.isArray(r)) scheduledAirings = r;
+      } catch {}
+    }
+
+    // Is this specific airing on the device's "will record" list? A series
+    // rule isn't enough: Tablo skips an airing as a duplicate when the same
+    // episode is scheduled at another time/channel, and skips conflicts.
+    function isAiringScheduled(datetime, channelIdentifier) {
+      if (!datetime) return false;
+      const t = new Date(datetime).getTime();
+      return scheduledAirings.some(a =>
+        new Date(a.datetime).getTime() === t &&
+        (!channelIdentifier || !a.channelIdentifier || a.channelIdentifier === channelIdentifier));
+    }
     let recPending = false; // record requested for the current airing; tuner hasn't confirmed capture yet
 
     const isTouch = window.matchMedia('(hover: none)').matches;
@@ -794,6 +814,7 @@
         seriesIndex = await seriesRes.json();
         const tuners = await tunerRes.json().catch(() => []);
         tunerStatus = Array.isArray(tuners) ? tuners : [];
+        loadScheduledAirings().then(() => { if (currentTab === 'guide') renderGuide(); updateRecBtn(); });
         const lib = await libRes.json().catch(() => ({}));
         library = lib.entries || [];
         archiveJobs = lib.jobs || [];
@@ -1129,6 +1150,7 @@
           fetch('/api/recordings'),
           fetch('/api/tuners'),
           refreshLibrary(),
+          loadScheduledAirings(),
         ]);
         const newRecs = await recsRes.json();
         recordings.length = 0;
@@ -1405,13 +1427,26 @@
       // capturing yet (Tablo takes ~10-40s). Distinct fast-pulse style so the
       // click visibly did something.
       btn.classList.toggle('pending', !isCapturing && recPending);
+      let airingSkipped = false;
+      if (seriesScheduled && !isCapturing && currentChannelId != null && scheduledAirings.length > 0) {
+        const ch = channels.find(c => String(c.id) === String(currentChannelId));
+        const airings = guideData[currentChannelId] || guideData[String(currentChannelId)] || [];
+        const now = Date.now();
+        const cur = airings.find(a => {
+          const st = new Date(a.datetime).getTime();
+          return now >= st && now <= st + (a.duration || 1800) * 1000;
+        });
+        airingSkipped = !!cur && !isAiringScheduled(cur.datetime, ch?.cloudId);
+      }
       btn.title = isCapturing
         ? 'Recording now — click to manage'
         : recPending
           ? 'Recording scheduled — starting shortly'
-          : seriesScheduled
-            ? 'Series scheduled — click to manage'
-            : 'Record this show';
+          : airingSkipped
+            ? 'Series scheduled, but Tablo is skipping this airing (duplicate or conflict) — click to record it'
+            : seriesScheduled
+              ? 'Series scheduled — click to manage'
+              : 'Record this show';
     }
 
     // After scheduling a recording for the current airing, poll the tuners
@@ -1922,6 +1957,7 @@
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           onStreamReady();
+          displayPos = null;
           const lb = document.getElementById('liveBtn');
           if (isLive) {
             lb.classList.remove('hidden');
@@ -1978,6 +2014,7 @@
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', () => {
           onStreamReady();
+          displayPos = null;
           const lb = document.getElementById('liveBtn');
           if (isLive) {
             lb.classList.remove('hidden');
@@ -2055,6 +2092,48 @@
       return { mode: 'vod', start: 0, end, pos: serverOffset + (v.currentTime || 0), edge: null, buffered: serverOffset + (v.duration || 0) };
     }
 
+    // ---------- Seeking ----------
+    // Three tiers, cheapest first:
+    //   1. target inside the playlist produced so far → set currentTime
+    //      (hls.js fetches the segment; instant if already buffered)
+    //   2. target a little past the produced edge → wait for the transcoder
+    //      to get there (it runs several times faster than realtime on a
+    //      recording), then set currentTime
+    //   3. otherwise → restart the transcode at the target (serverSeek)
+    // Rapid skip presses are coalesced into one seek, and the timeline shows
+    // the pending target immediately so the bar never looks frozen.
+    const SKIP_COALESCE_MS = 300;
+    const WAIT_AHEAD_MAX = 45;        // seconds past the produced edge we'll wait for
+    const WAIT_TIMEOUT_MS = 8000;     // give up waiting and restart instead
+    let skipTarget = null;            // absolute position of a pending coalesced skip
+    let skipTimer = null;
+    let waitSeek = null;              // { targetLocal, timer, deadline }
+    let displayPos = null;            // absolute position to show while a seek is pending
+    let serverSeekInFlight = false;   // a transcode restart is underway (video/offset are stale)
+
+    function producedEnd() {
+      const v = video;
+      return isFinite(v.duration) ? v.duration : 0;
+    }
+
+    function transcodeEnded() {
+      try {
+        const det = hls && hls.levels && hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : 0]?.details;
+        return det ? !det.live : false;
+      } catch { return false; }
+    }
+
+    function cancelWaitSeek() {
+      if (!waitSeek) return;
+      clearInterval(waitSeek.timer);
+      waitSeek = null;
+    }
+
+    function clearPendingSeekUI() {
+      displayPos = null;
+      updateControls();
+    }
+
     // Seek relative (skip +/- seconds)
     function seekTo(delta) {
       showUI();
@@ -2065,39 +2144,182 @@
         v.currentTime = Math.max(0, Math.min(dur - 0.25, (v.currentTime || 0) + delta));
         return;
       }
-      const currentAbsolute = serverOffset + (v.currentTime || 0);
+      const t = getTimeline();
+      // Chain off whatever seek is already pending so +10 +10 +10 = +30.
+      // While a seek is in flight the video/offset are stale, so the
+      // displayed (pending) position is the truth.
+      const base = skipTarget != null ? skipTarget
+        : waitSeek ? serverOffset + waitSeek.targetLocal
+        : displayPos != null ? displayPos
+        : t.pos;
 
       let maxPos = totalDuration || Infinity;
-      if (liveRecording) {
-        maxPos = getTimeline().edge - 5;
+      if (liveRecording) maxPos = t.edge - 5;
+      if (t.mode === 'channel') maxPos = t.end;
+
+      skipTarget = Math.max(t.start, Math.min(maxPos, base + delta));
+      displayPos = skipTarget;
+      updateControls();
+
+      clearTimeout(skipTimer);
+      const gen = playGen;
+      skipTimer = setTimeout(() => {
+        const target = skipTarget;
+        skipTarget = null;
+        skipTimer = null;
+        if (gen !== playGen) { clearPendingSeekUI(); return; }   // stream changed meanwhile
+        seekAbsolute(target);
+      }, SKIP_COALESCE_MS);
+    }
+
+    // Seek to an absolute position (seconds into the recording, or into the
+    // DVR window for a live channel), picking the cheapest tier that works.
+    function seekAbsolute(targetAbsolute) {
+      const v = video;
+      cancelWaitSeek();
+
+      if (isLive && !liveRecording) {
+        // Live channel: seek within the DVR window only
+        const t = getTimeline();
+        v.currentTime = Math.max(t.start, Math.min(targetAbsolute, t.end - 0.5));
+        clearPendingSeekUI();
+        return;
       }
 
-      const targetAbsolute = Math.max(0, Math.min(maxPos, currentAbsolute + delta));
-      const targetLocal = targetAbsolute - serverOffset;
-
-      // Check what's actually buffered
-      const bufEnd = v.buffered.length > 0 ? v.buffered.end(v.buffered.length - 1) : 0;
-      const bufStart = v.buffered.length > 0 ? v.buffered.start(0) : 0;
-
-      if (targetLocal >= bufStart && targetLocal <= bufEnd) {
-        v.currentTime = targetLocal;
-      } else if (targetLocal >= 0 && targetLocal <= bufEnd + 2) {
-        v.currentTime = Math.max(0, bufEnd - 0.5);
-      } else if (isLive && !liveRecording && targetLocal > bufEnd) {
-        v.currentTime = Math.max(0, bufEnd - 0.5);
-      } else {
+      if (serverSeekInFlight) {
+        // The old playlist is gone and the new one isn't up yet — nothing to
+        // seek within; the server supersedes the in-flight restart.
         serverSeek(targetAbsolute);
+        return;
       }
+
+      const targetLocal = targetAbsolute - serverOffset;
+      const produced = producedEnd();
+
+      if (targetLocal >= 0 && targetLocal <= produced) {
+        // Tier 1: within what the transcoder has produced for this session
+        v.currentTime = Math.min(targetLocal, Math.max(0, produced - 0.25));
+        clearPendingSeekUI();
+        return;
+      }
+
+      const ahead = targetLocal - produced;
+      if (targetLocal >= 0 && ahead > 0 && ahead <= WAIT_AHEAD_MAX && !transcodeEnded() && currentSessionId) {
+        // Tier 2: just past the produced edge — wait for it rather than
+        // tearing down ffmpeg (a restart costs more than the wait).
+        startWaitSeek(targetLocal, targetAbsolute);
+        return;
+      }
+
+      if (transcodeEnded() && targetLocal > produced) {
+        // Whole recording is produced; clamp to its end
+        v.currentTime = Math.max(0, produced - 0.5);
+        clearPendingSeekUI();
+        return;
+      }
+
+      // Tier 3: restart the transcode at the target
+      serverSeek(targetAbsolute);
+    }
+
+    // Read how much the transcoder has produced straight from the session
+    // playlist. hls.js only re-reads an EVENT playlist every few seconds, so
+    // video.duration lags well behind the real produced edge.
+    async function fetchProduced(sessionId) {
+      const res = await fetch(`/hls/${sessionId}/stream.m3u8?w=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error('playlist ' + res.status);
+      const text = await res.text();
+      let total = 0;
+      for (const m of text.matchAll(/^#EXTINF:([0-9.]+)/gm)) total += parseFloat(m[1]);
+      return { produced: total, ended: /^#EXT-X-ENDLIST/m.test(text) };
+    }
+
+    function startWaitSeek(targetLocal, targetAbsolute) {
+      const v = video;
+      const sid = currentSessionId;
+      displayPos = targetAbsolute;
+      setLoading('Skipping ahead...');
+      const wasPlaying = !v.paused;
+      v.pause();
+      const t0 = Date.now();
+      const deadline = t0 + WAIT_TIMEOUT_MS;
+      const gen = playGen;
+      const samples = [];   // [{t, produced}] to estimate the transcoder's rate
+      let busy = false;
+      waitSeek = { targetLocal, deadline, timer: null };
+
+      const finish = (pos) => {
+        cancelWaitSeek();
+        try {
+          // Make hls.js re-read the playlist now instead of on its own
+          // schedule, so the seek lands without a multi-second stall.
+          if (hls) { hls.stopLoad(); hls.startLoad(pos); }
+        } catch {}
+        const apply = () => {
+          v.currentTime = pos;
+          hideLoading();
+          clearPendingSeekUI();
+          if (wasPlaying) v.play().catch(() => {});
+        };
+        // The media element clamps currentTime to its current duration, which
+        // hls.js only extends once it has parsed the refreshed playlist — so
+        // hold the seek until the duration covers the target.
+        if (isFinite(v.duration) && v.duration >= pos) { apply(); return; }
+        let n = 0;
+        const iv = setInterval(() => {
+          if (gen !== playGen) { clearInterval(iv); return; }
+          if ((isFinite(v.duration) && v.duration >= pos) || ++n > 25) { clearInterval(iv); apply(); }
+        }, 200);
+      };
+      const bail = () => {
+        cancelWaitSeek();
+        serverSeek(serverOffset + targetLocal);
+      };
+
+      const tick = async () => {
+        if (!waitSeek || gen !== playGen) { cancelWaitSeek(); return; }
+        if (busy) return;
+        busy = true;
+        try {
+          const { produced, ended } = await fetchProduced(sid);
+          if (!waitSeek || gen !== playGen) return;
+          if (produced >= targetLocal + 0.5) { finish(targetLocal); return; }
+          if (ended) { finish(Math.max(0, produced - 0.5)); return; }
+          const now = Date.now();
+          samples.push({ t: now, produced });
+          const first = samples[0];
+          const elapsed = (now - first.t) / 1000;
+          if (elapsed >= 1.5) {
+            // Enough samples to judge: if the transcoder won't reach the
+            // target soon, a restart is cheaper than waiting.
+            const rate = (produced - first.produced) / elapsed;   // produced seconds per wall second
+            const remaining = targetLocal + 0.5 - produced;
+            const eta = rate > 0.05 ? remaining / rate : Infinity;
+            if (eta > 6) { bail(); return; }
+          }
+          if (now > deadline) bail();
+        } catch {
+          if (waitSeek && Date.now() > deadline) bail();
+        } finally {
+          busy = false;
+        }
+      };
+      waitSeek.timer = setInterval(tick, 400);
+      tick();
     }
 
     // Seek to absolute position in the recording
     async function serverSeek(absoluteSeconds) {
       if (!currentSessionId) return;
 
+      cancelWaitSeek();
+      displayPos = absoluteSeconds;
+      updateControls();
       setLoading('Seeking...');
 
       if (hls) { hls.destroy(); hls = null; }
       const gen = ++playGen;
+      serverSeekInFlight = true;
 
       try {
         const res = await fetch(`/api/seek/${currentSessionId}`, {
@@ -2107,15 +2329,23 @@
         });
         const data = await res.json();
         if (gen !== playGen) return;
+        if (data.superseded) return;   // a newer seek of ours is in flight
+        if (data.error) throw new Error(data.error);
         serverOffset = data.startOffset;
 
         await waitForPlaylist(data.url, gen);
         if (gen !== playGen) return;
+        serverSeekInFlight = false;
         loadHls(data.url, document.getElementById('video'), document.getElementById('loading'));
       } catch (e) {
         if (gen !== playGen) return;
+        serverSeekInFlight = false;
         hideLoading();
+        clearPendingSeekUI();
         showError('Seek failed: ' + e.message);
+      } finally {
+        // Only the newest seek owns the flag
+        if (gen === playGen && serverSeekInFlight && !hls) serverSeekInFlight = false;
       }
     }
 
@@ -2132,7 +2362,8 @@
         // engine (no fragile in-place seek).
         const recStart = new Date(liveRecording.date).getTime();
         const liveOffset = Math.max(0, (Date.now() - recStart) / 1000 - 5);
-        serverSeek(liveOffset);
+        clearTimeout(skipTimer); skipTimer = null; skipTarget = null;
+        seekAbsolute(liveOffset);
         return;
       }
       // Seek to the live edge of BUFFERED data — the only forward seek iOS
@@ -2358,7 +2589,7 @@
       const t = getTimeline();
       const lb = document.getElementById('liveBtn');
       const span = Math.max(0, t.end - t.start);
-      const current = Math.max(0, t.pos - t.start);
+      const current = Math.max(0, (displayPos != null ? displayPos : t.pos) - t.start);
 
       document.getElementById('timeTotal').textContent = fmt(span);
 
@@ -2420,13 +2651,11 @@
       // Clamp to just behind the live edge for an in-progress recording
       if (t.mode === 'liveRec') target = Math.min(target, t.edge - 5);
       target = Math.max(0, target);
-
-      const localDur = isFinite(video.duration) ? video.duration : 0;
-      if (localDur && target >= serverOffset && target <= serverOffset + localDur) {
-        video.currentTime = target - serverOffset;
-      } else {
-        serverSeek(target);
-      }
+      // Drop any coalesced skip still pending — the bar wins
+      clearTimeout(skipTimer); skipTimer = null; skipTarget = null;
+      displayPos = target;
+      updateControls();
+      seekAbsolute(target);
     }
 
     seekWrap.addEventListener('pointerdown', (e) => {
@@ -2643,11 +2872,20 @@
 
           const showId = a.show?.identifier || '';
           const sEntry = showId ? seriesIndex[showId] : null;
-          const isScheduled = sEntry && sEntry.schedule !== 'none';
+          const seriesScheduled = sEntry && sEntry.schedule !== 'none';
+          const airingScheduled = isAiringScheduled(a.datetime, ch.cloudId);
           const isActiveRec = isOn && isChannelRecording(ch.id);
-          const recActive = isScheduled || isActiveRec;
+          // Red = will record (or is recording). Amber hollow = the series is
+          // scheduled but Tablo is skipping THIS airing (duplicate of another
+          // scheduled airing, or a tuner conflict) — clicking offers to record
+          // it anyway.
+          const skipped = seriesScheduled && !airingScheduled && !isActiveRec && scheduledAirings.length > 0;
+          const recActive = airingScheduled || isActiveRec || (seriesScheduled && scheduledAirings.length === 0);
+          const recTitle = isActiveRec ? 'Recording now'
+            : skipped ? 'Series scheduled, but Tablo is skipping this airing (duplicate or conflict) — click to record it anyway'
+            : recActive ? 'Scheduled' : 'Record';
           const recIcon = showId
-            ? `<span class="guide-rec-btn${recActive ? ' recording' : ''}" onclick="toggleRecordShow('${escAttr(showId)}', event, '${escAttr(a.datetime)}', '${escAttr(ch.cloudId || '')}')" title="${isActiveRec ? 'Recording now' : isScheduled ? 'Scheduled' : 'Record'}">&#9679;</span>`
+            ? `<span class="guide-rec-btn${recActive ? ' recording' : skipped ? ' skipped' : ''}" onclick="toggleRecordShow('${escAttr(showId)}', event, '${escAttr(a.datetime)}', '${escAttr(ch.cloudId || '')}')" title="${escAttr(recTitle)}">${skipped ? '&#9675;' : '&#9679;'}</span>`
             : '';
 
           progsHtml += `<div class="guide-program${isOn ? ' on-now' : ''}" style="left:${left}px;width:${width - 2}px" title="${escAttr(tooltip)}" onclick="playFromGuide('${ch.id}')">
@@ -2687,7 +2925,7 @@
       btn.disabled = true;
       try {
         await fetch('/api/refresh?guide=1', { method: 'POST' });
-        const [gRes, sRes] = await Promise.all([fetch('/api/guide'), fetch('/api/series')]);
+        const [gRes, sRes] = await Promise.all([fetch('/api/guide'), fetch('/api/series'), loadScheduledAirings()]);
         guideData = await gRes.json();
         seriesIndex = await sRes.json();
         renderGuide();

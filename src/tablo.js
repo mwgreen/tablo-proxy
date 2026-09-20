@@ -328,6 +328,7 @@ export async function scheduleAiring(showId, airingDatetime, schedule = true, ch
         const ep = await nativeDeviceRequest('GET', epPath);
         if (normalizeDatetime(ep.airing_details?.datetime) === targetTime) {
           const result = await nativeDeviceRequest('PATCH', epPath, { scheduled: schedule });
+          invalidateScheduledAirings();
           return result;
         }
       }
@@ -351,10 +352,12 @@ export async function scheduleAiring(showId, airingDatetime, schedule = true, ch
       if (!timeMatchOnly) timeMatchOnly = p;
       continue;
     }
+    invalidateScheduledAirings();
     return nativeDeviceRequest('PATCH', p, { scheduled: schedule });
   }
 
   if (timeMatchOnly && !channelIdentifier) {
+    invalidateScheduledAirings();
     return nativeDeviceRequest('PATCH', timeMatchOnly, { scheduled: schedule });
   }
 
@@ -472,13 +475,14 @@ export async function startWatch(channelId) {
 }
 
 // Native device request (without ?lh) — needed for scheduling
-async function nativeDeviceRequest(method, path, body) {
+async function nativeDeviceRequest(method, path, body, query = '') {
   if (!deviceUrl) throw new Error('Device not discovered');
 
   const bodyStr = body ? JSON.stringify(body) : '';
+  // Sign the bare path; a query string (e.g. ?state=scheduled) goes only on the URL
   const authHeaders = makeDeviceAuth(method, path, bodyStr);
 
-  const res = await withRediscover(() => fetch(`${deviceUrl}${path}`, {
+  const res = await withRediscover(() => fetch(`${deviceUrl}${path}${query}`, {
     method,
     headers: {
       ...authHeaders,
@@ -550,6 +554,7 @@ export async function scheduleSeries(showId, rule = 'new') {
 
   const data = await nativeDeviceRequest('PATCH', entry.path, { schedule: { rule } });
   entry.schedule = data.schedule?.rule || rule;
+  invalidateScheduledAirings();
   return data;
 }
 
@@ -564,6 +569,37 @@ export function getScheduledSeries() {
     .filter(([, v]) => v.schedule !== 'none')
     .map(([id, v]) => ({ showId: id, ...v }));
 }
+
+// Airings the device will actually capture, straight from its scheduler.
+// A series rule ("all"/"new") is not the whole story: Tablo marks individual
+// airings "skipped" when the same episode is already scheduled at another
+// time/channel (skip_reason "duplicate") or when tuners conflict, and it only
+// records the ones in this list. Cached briefly — the guide re-renders often.
+let scheduledAiringsCache = { at: 0, list: [] };
+export async function fetchScheduledAirings(maxAgeMs = 30000) {
+  if (Date.now() - scheduledAiringsCache.at < maxAgeMs) return scheduledAiringsCache.list;
+  const paths = await nativeDeviceRequest('GET', '/guide/airings', null, '?state=scheduled');
+  const list = [];
+  for (const p of paths) {
+    try {
+      const a = await nativeDeviceRequest('GET', p);
+      list.push({
+        path: p,
+        datetime: a.airing_details?.datetime || '',
+        duration: a.airing_details?.duration || 0,
+        channelIdentifier: a.airing_details?.channel?.channel?.channel_identifier || null,
+        title: a.airing_details?.show_title || '',
+        state: a.schedule?.state || 'scheduled',
+      });
+    } catch {
+      // skip a single bad airing
+    }
+  }
+  scheduledAiringsCache = { at: Date.now(), list };
+  return list;
+}
+
+export function invalidateScheduledAirings() { scheduledAiringsCache.at = 0; }
 
 export async function startRecordingWatch(recordingId) {
   const body = {
