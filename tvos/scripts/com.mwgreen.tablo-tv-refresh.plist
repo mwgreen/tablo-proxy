@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mwgreen.tablo-tv-refresh</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/mwgreen/git-repos/tablo-proxy/tvos/scripts/refresh.sh</string>
+  </array>
+  <!-- Every 6 hours while the Mac is awake, plus once at login. The script
+       itself decides whether a rebuild is due, so firing often is cheap. -->
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/tablo-tv-refresh.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/tablo-tv-refresh.launchd.log</string>
+</dict>
+</plist>

@@ -1,0 +1,34 @@
+# XcodeGen spec — regenerate the Xcode project with `xcodegen generate` (run from this dir).
+# The .xcodeproj is NOT committed; project.yml is the source of truth.
+name: TabloTV
+options:
+  bundleIdPrefix: com.mwgreen
+  deploymentTarget:
+    tvOS: "17.0"
+  xcodeVersion: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    CODE_SIGN_STYLE: Automatic
+    # DEVELOPMENT_TEAM is injected by scripts/refresh.sh from ~/.config/tablo-tv/refresh.env
+    # (or set it once in Xcode > Signing & Capabilities when running by hand).
+targets:
+  TabloTV:
+    type: application
+    platform: tvOS
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Tablo
+        UILaunchScreen: {}
+        UIUserInterfaceStyle: Dark
+        # The proxy is plain http on the LAN
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mwgreen.tablotv
+        TARGETED_DEVICE_FAMILY: "3"
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
