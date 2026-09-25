@@ -8,6 +8,7 @@ let tunerCount = 2;
 let channels = [];
 let recordings = [];
 let guideData = {};
+const GUIDE_CONCURRENCY = 8;
 let seriesIndex = {}; // cloudShowId -> { path, title, schedule }
 
 export function getDeviceUrl() { return deviceUrl; }
@@ -251,21 +252,31 @@ export async function fetchRecordings() {
 }
 
 export async function fetchGuide(days = 2) {
-  guideData = {};
-
   // Try cloud API first for rich guide data
+  const fresh = {};
   try {
     const tokens = getTokens();
     const headers = cloudHeaders();
 
     const today = new Date();
+    const jobs = [];
     for (let i = 0; i < days; i++) {
       const date = new Date(today);
       date.setDate(date.getDate() + i);
       const dateStr = date.toISOString().split('T')[0];
-
       for (const ch of channels) {
         if (!ch.cloudId) continue;
+        jobs.push({ ch, dateStr });
+      }
+    }
+
+    // Fetch with bounded concurrency — one request per channel per day
+    // sequentially takes minutes at a 7-day window.
+    const perChannelDay = new Map();
+    let next = 0;
+    const worker = async () => {
+      while (next < jobs.length) {
+        const { ch, dateStr } = jobs[next++];
         try {
           const res = await fetch(
             `${CLOUD_BASE}/account/guide/channels/${ch.cloudId}/airings/${dateStr}/`,
@@ -273,19 +284,35 @@ export async function fetchGuide(days = 2) {
           );
           if (res.ok) {
             const airings = await res.json();
-            if (!guideData[ch.id]) guideData[ch.id] = [];
-            guideData[ch.id].push(...(airings || []));
+            perChannelDay.set(`${ch.id}|${dateStr}`, airings || []);
           }
         } catch (e) {
-          // Skip individual channel failures
+          // Skip individual channel/day failures
         }
       }
+    };
+    await Promise.all(Array.from({ length: Math.min(GUIDE_CONCURRENCY, jobs.length) }, worker));
+
+    // Reassemble in deterministic channel/day order.
+    for (const { ch, dateStr } of jobs) {
+      const airings = perChannelDay.get(`${ch.id}|${dateStr}`);
+      if (!airings) continue;
+      if (!fresh[ch.id]) fresh[ch.id] = [];
+      fresh[ch.id].push(...airings);
     }
   } catch (e) {
     console.warn(`[tablo] Cloud guide fetch failed: ${e.message}`);
   }
 
-  console.log(`[tablo] Guide data loaded for ${Object.keys(guideData).length} channels`);
+  // Only replace the served data once the new fetch is complete, so a
+  // periodic refresh never leaves the guide empty mid-fetch.
+  if (Object.keys(fresh).length > 0 || Object.keys(guideData).length === 0) {
+    guideData = fresh;
+  } else {
+    console.warn('[tablo] Guide refresh returned no data; keeping previous guide');
+  }
+
+  console.log(`[tablo] Guide data loaded for ${Object.keys(guideData).length} channels (${days} days)`);
   return guideData;
 }
 
