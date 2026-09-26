@@ -1,9 +1,30 @@
-# TabloTV — native tvOS app (starter)
+# TabloTV — native tvOS app
 
-SwiftUI app for Apple TV that talks to the tablo-proxy API: live channel list,
-recordings list, and playback of the proxy's HLS streams with the system player.
-It's the scaffold for a custom couch UI; the guide grid and record controls
-from the web UI are not ported yet.
+SwiftUI app for Apple TV that talks to the tablo-proxy API. It covers the
+same ground as the web UI, laid out for the couch:
+
+- **Live TV** — channel list with what's on now, favorites filter (hold
+  Select on a channel to star it or open its record menu), REC badges for
+  channels the Tablo is capturing, tuner usage.
+- **Guide** — 3-hour grid paged with Earlier / Now / Later; each program shows
+  the schedule state the way the web UI does (red = will record or is
+  recording, amber = series scheduled but Tablo is skipping this airing).
+  Select a program to watch the channel or change what gets recorded.
+- **Recordings** — the Tablo's recordings merged with the copies archived on
+  the proxy host, by date / by show / A–Z, with SAVED / SAVING badges and
+  resume positions. A detail page offers play / resume / watch live, stop a
+  capture (keeping the partial), save a copy, and delete (Tablo copy, saved
+  copy, or both).
+- **Player** — the system player (native scrubbing, skip, play/pause on the
+  Siri remote). The transport bar's menu adds **Record** (for the channel
+  being watched) and **Jump to** (restarts the transcode at a point past what
+  has been transcoded so far); **Go Live** jumps to the live edge. Swipe down
+  for details and position. Archived recordings play as plain MP4s with
+  instant native seek.
+- Watching a channel that's being recorded plays the recording seeked to the
+  live edge so you can rewind to its start; when the capture ends, playback
+  continues live on the channel. Sessions are kept alive while paused and
+  reopened at the same position if the proxy reaps them.
 
 ## Build
 
