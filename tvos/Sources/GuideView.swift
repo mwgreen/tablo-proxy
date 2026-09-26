@@ -197,10 +197,10 @@ struct GuideView: View {
     /// these buttons first (not on the tab bar when the grid column happens
     /// to sit under it).
     private var header: some View {
-        HStack(spacing: 24) {
-            Text(Fmt.dayLabel(windowStart)).font(.title2).bold()
-            Text("\(Fmt.time(windowStart)) – \(Fmt.time(windowEnd))").font(.title3).foregroundStyle(.secondary)
-            Spacer()
+        HStack(alignment: .top, spacing: 24) {
+            focusDetails
+                .frame(maxWidth: .infinity, minHeight: 104, maxHeight: 104, alignment: .topLeading)
+                .clipped()
             Button {
                 windowStart = windowStart.addingTimeInterval(-GuideView.windowHours * 3600)
             } label: { Label("Earlier", systemImage: "chevron.left") }
@@ -223,9 +223,78 @@ struct GuideView: View {
         .focusSection()
     }
 
+    /// Details of whatever has focus: a program's title, channel, time,
+    /// episode and description; a channel's name and what's on now; or, with
+    /// focus elsewhere, the date and the window's time range. Fixed height so
+    /// the grid doesn't move as focus does.
+    @ViewBuilder
+    private var focusDetails: some View {
+        switch focus {
+        case .cell(let chId, let airingId)?:
+            if let ch = store.channel(id: chId),
+               let a = store.airings(for: chId).first(where: { $0.id == airingId }) {
+                programDetails(a, on: ch)
+            } else {
+                dateDetails
+            }
+        case .label(let chId)?:
+            if let ch = store.channel(id: chId) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(ch.label).font(.headline).lineLimit(1)
+                    if let a = store.currentAiring(for: chId, at: now) {
+                        Text("Now: \(a.displayTitle)  ·  until \(Fmt.time(a.end))")
+                            .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Text("Select to watch").font(.caption).foregroundStyle(.tertiary)
+                }
+            } else {
+                dateDetails
+            }
+        default:
+            dateDetails
+        }
+    }
+
+    private var dateDetails: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 24) {
+            Text(Fmt.dayLabel(windowStart)).font(.title2).bold()
+            Text("\(Fmt.time(windowStart)) – \(Fmt.time(windowEnd))").font(.title3).foregroundStyle(.secondary)
+        }
+    }
+
+    private func programDetails(_ a: GuideAiring, on ch: Channel) -> some View {
+        var meta = ["\(ch.number) \(ch.name)", "\(Fmt.time(a.start)) – \(Fmt.time(a.end))"]
+        if !a.episodeInfo.isEmpty { meta.append(a.episodeInfo) }
+        switch store.recordMark(for: a, on: ch, now: now) {
+        case .recordingNow: meta.append("● Recording")
+        case .scheduled: meta.append("● Scheduled")
+        case .skipped: meta.append("○ Skipped (duplicate or conflict)")
+        case .notScheduled: break
+        }
+        let episode = (!a.episodeTitle.isEmpty && a.episodeTitle != a.showTitle) ? a.episodeTitle : ""
+        // Title, episode and the details share one line so the description
+        // gets two full lines without taking more of the guide's height.
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Text(a.showTitle).font(.headline).lineLimit(1).layoutPriority(2)
+                if !episode.isEmpty {
+                    Text(episode).font(.callout).lineLimit(1).layoutPriority(1)
+                }
+                Text(meta.joined(separator: "  ·  ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            if !a.synopsis.isEmpty {
+                Text(a.synopsis).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
+    }
+
     private var timeHeader: some View {
         HStack(spacing: 0) {
-            Color.clear.frame(width: GuideView.labelWidth + 12)
+            // The date lives here now; the header shows focused-program details.
+            Text(Fmt.dayLabel(windowStart))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: GuideView.labelWidth + 12, alignment: .leading)
             ForEach(0..<Int(GuideView.windowHours * 2), id: \.self) { i in
                 Text(Fmt.time(windowStart.addingTimeInterval(Double(i) * 1800)))
                     .font(.caption.weight(.semibold))

@@ -22,7 +22,9 @@ struct ContentView: View {
         .overlay(alignment: .top) { ErrorBanner() }
         // The mini player lives in the top-right corner, level with the tab
         // bar, so it costs the browse screens no space.
-        .overlay(alignment: .topTrailing) { MiniPlayerView() }
+        // Inset to line up with the screens' content, which is padded 40pt
+        // inside the safe area.
+        .overlay(alignment: .topTrailing) { MiniPlayerView().padding(.trailing, 40) }
         .overlay(alignment: .bottom) { ToastView() }
         .overlay {
             if store.loading && !store.loaded {
