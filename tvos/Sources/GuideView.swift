@@ -21,6 +21,11 @@ struct GuideView: View {
     /// command is reported after the focus engine has already acted on it.
     @State private var prevFocus: GuideFocus?
     @State private var focusChangedAt = Date.distantPast
+    /// Index of the channel row at the top of the grid. The guide scrolls by
+    /// whole rows itself; tvOS's own focus scrolling moves just enough to
+    /// show the focused row, which leaves a half row at the top.
+    @State private var topRow = 0
+    @State private var gridHeight: CGFloat = 0
 
     /// How far one edge press moves the window.
     static let edgeStep: TimeInterval = 90 * 60
@@ -56,9 +61,13 @@ struct GuideView: View {
                 }
                 Spacer()
             } else {
+                // The time bar sits above the scroll view rather than pinned
+                // inside it: tvOS scrolls the focused row flush to the top of
+                // the scroll view, which put half a row under a pinned header.
+                timeHeader
+                ScrollViewReader { proxy in
                 ScrollView(.vertical) {
-                    LazyVStack(spacing: 8, pinnedViews: [.sectionHeaders]) {
-                        Section {
+                    LazyVStack(spacing: 8) {
                             ForEach(store.visibleChannels) { ch in
                                 GuideRow(channel: ch,
                                          airings: store.airings(for: ch.id),
@@ -68,11 +77,17 @@ struct GuideView: View {
                                          focus: $focus,
                                          onAiring: { a in selection = GuideSelection(channel: ch, airing: a) },
                                          onChannel: { store.playRequest = PlayRequest(kind: .channel(ch)) })
+                                .id(ch.id)
                             }
-                        } header: {
-                            timeHeader
-                        }
                     }
+                    .padding(.top, 8)
+                }
+                .clipped()
+                .background(GeometryReader { g in
+                    Color.clear.onAppear { gridHeight = g.size.height }
+                        .onChange(of: g.size.height) { _, h in gridHeight = h }
+                })
+                .onChange(of: focus) { _, f in alignRows(to: f, proxy: proxy) }
                 }
                 .focusSection()
                 .onMoveCommand(perform: pageAtEdge)
@@ -155,6 +170,28 @@ struct GuideView: View {
         }
     }
 
+    /// Keep the focused row on screen, scrolling in whole-row steps so the
+    /// grid always starts with a complete row.
+    private func alignRows(to f: GuideFocus?, proxy: ScrollViewProxy) {
+        let chId: Int
+        switch f {
+        case .cell(let id, _)?: chId = id
+        case .label(let id)?: chId = id
+        default: return
+        }
+        let rows = store.visibleChannels
+        guard let i = rows.firstIndex(where: { $0.id == chId }) else { return }
+        let pitch = GuideView.rowHeight + 8
+        let visible = max(1, Int((gridHeight - 8) / pitch))
+        var top = topRow
+        if i < top { top = i } else if i >= top + visible { top = i - visible + 1 }
+        top = max(0, min(top, max(0, rows.count - visible)))
+        topRow = top
+        withAnimation(.easeInOut(duration: 0.2)) {
+            proxy.scrollTo(rows[top].id, anchor: .top)
+        }
+    }
+
     /// Is this the first (or last) program visible in its row?
     private func isEdge(_ chId: Int, _ airingId: String, first: Bool) -> Bool {
         let row = store.airings(for: chId).filter { $0.end > windowStart && $0.start < windowEnd }
@@ -197,10 +234,9 @@ struct GuideView: View {
     /// these buttons first (not on the tab bar when the grid column happens
     /// to sit under it).
     private var header: some View {
-        HStack(alignment: .top, spacing: 24) {
+        HStack(alignment: .center, spacing: 24) {
             focusDetails
-                .frame(maxWidth: .infinity, minHeight: 104, maxHeight: 104, alignment: .topLeading)
-                .clipped()
+                .frame(maxWidth: .infinity, alignment: .leading)
             Button {
                 windowStart = windowStart.addingTimeInterval(-GuideView.windowHours * 3600)
             } label: { Label("Earlier", systemImage: "chevron.left") }
@@ -223,30 +259,24 @@ struct GuideView: View {
         .focusSection()
     }
 
-    /// Details of whatever has focus: a program's title, channel, time,
-    /// episode and description; a channel's name and what's on now; or, with
-    /// focus elsewhere, the date and the window's time range. Fixed height so
-    /// the grid doesn't move as focus does.
+    /// One line about whatever has focus. A program shows just its detail —
+    /// the episode ("Hawaii at Wyoming" under "College Football"), or its full
+    /// title when there's no episode, since grid cells truncate titles. A
+    /// channel label shows the same for what's on now. Otherwise the date
+    /// and the window's time range. Channel, time and description are left
+    /// to the grid and the program's Select dialog.
     @ViewBuilder
     private var focusDetails: some View {
         switch focus {
         case .cell(let chId, let airingId)?:
-            if let ch = store.channel(id: chId),
-               let a = store.airings(for: chId).first(where: { $0.id == airingId }) {
-                programDetails(a, on: ch)
+            if let a = store.airings(for: chId).first(where: { $0.id == airingId }) {
+                detailLine(a)
             } else {
                 dateDetails
             }
         case .label(let chId)?:
-            if let ch = store.channel(id: chId) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(ch.label).font(.headline).lineLimit(1)
-                    if let a = store.currentAiring(for: chId, at: now) {
-                        Text("Now: \(a.displayTitle)  ·  until \(Fmt.time(a.end))")
-                            .font(.callout).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Text("Select to watch").font(.caption).foregroundStyle(.tertiary)
-                }
+            if let a = store.currentAiring(for: chId, at: now) {
+                detailLine(a)
             } else {
                 dateDetails
             }
@@ -255,37 +285,17 @@ struct GuideView: View {
         }
     }
 
-    private var dateDetails: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 24) {
-            Text(Fmt.dayLabel(windowStart)).font(.title2).bold()
-            Text("\(Fmt.time(windowStart)) – \(Fmt.time(windowEnd))").font(.title3).foregroundStyle(.secondary)
-        }
+    private func detailLine(_ a: GuideAiring) -> some View {
+        let detail = (!a.episodeTitle.isEmpty && a.episodeTitle != a.showTitle) ? a.episodeTitle : a.showTitle
+        return Text(detail).font(.title3).bold().lineLimit(1)
     }
 
-    private func programDetails(_ a: GuideAiring, on ch: Channel) -> some View {
-        var meta = ["\(ch.number) \(ch.name)", "\(Fmt.time(a.start)) – \(Fmt.time(a.end))"]
-        if !a.episodeInfo.isEmpty { meta.append(a.episodeInfo) }
-        switch store.recordMark(for: a, on: ch, now: now) {
-        case .recordingNow: meta.append("● Recording")
-        case .scheduled: meta.append("● Scheduled")
-        case .skipped: meta.append("○ Skipped (duplicate or conflict)")
-        case .notScheduled: break
+    private var dateDetails: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 24) {
+            Text(Fmt.dayLabel(windowStart)).font(.title3).bold()
+            Text("\(Fmt.time(windowStart)) – \(Fmt.time(windowEnd))").font(.title3).foregroundStyle(.secondary)
         }
-        let episode = (!a.episodeTitle.isEmpty && a.episodeTitle != a.showTitle) ? a.episodeTitle : ""
-        // Title, episode and the details share one line so the description
-        // gets two full lines without taking more of the guide's height.
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 14) {
-                Text(a.showTitle).font(.headline).lineLimit(1).layoutPriority(2)
-                if !episode.isEmpty {
-                    Text(episode).font(.callout).lineLimit(1).layoutPriority(1)
-                }
-                Text(meta.joined(separator: "  ·  ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            if !a.synopsis.isEmpty {
-                Text(a.synopsis).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            }
-        }
+        .lineLimit(1)
     }
 
     private var timeHeader: some View {
