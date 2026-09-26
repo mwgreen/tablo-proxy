@@ -81,6 +81,8 @@ final class AppStore: ObservableObject {
 
     private var toastTask: Task<Void, Never>?
     private var recordingsRefreshing = false
+    /// Last time we asked the proxy to rescan the Tablo (POST /api/refresh).
+    private var lastRescan: Date?
 
     init() {
         favoritesOnly = UserDefaults.standard.bool(forKey: "favoritesOnly")
@@ -117,12 +119,26 @@ final class AppStore: ObservableObject {
         recordingsRefreshing = true
         defer { recordingsRefreshing = false }
         do {
-            if rescan { try await client.refresh(guide: false) }
+            if rescan {
+                try await client.refresh(guide: false)
+                lastRescan = Date()
+            }
             recordings = try await client.recordings()
             await refreshLibrary()
         } catch {
             showToast("Refresh failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Opening the Recordings tab rescans the Tablo like the web UI does, but
+    /// onAppear also fires on every pop back from a detail/show page and every
+    /// tab switch; a rescan costs one device request per recording, so only
+    /// rescan when the last one is stale and otherwise just re-read the
+    /// proxy's cached list. Skipped until the initial load has finished.
+    func refreshRecordingsOnAppear() async {
+        guard loaded else { return }
+        let stale = lastRescan.map { Date().timeIntervalSince($0) > 120 } ?? true
+        await refreshRecordings(rescan: stale)
     }
 
     func refreshLibrary() async {
@@ -401,26 +417,35 @@ final class AppStore: ObservableObject {
 
     // MARK: Recording management
 
-    func deleteRecording(_ id: String) async {
+    /// Returns whether the delete succeeded (callers only dismiss on success).
+    @discardableResult
+    func deleteRecording(_ id: String) async -> Bool {
         do {
             try await client.deleteRecording(id)
             recordings.removeAll { $0.idString == id }
             if !library.contains(where: { $0.id == id }) { clearResume(id) }
             showToast("Deleted from Tablo")
             delayedRefresh()
+            return true
         } catch {
             showToast("Delete failed: \(error.localizedDescription)")
+            return false
         }
     }
 
-    func stopRecording(_ id: String) async {
+    /// Returns whether the proxy accepted the stop. The player only treats the
+    /// capture as ended on success — otherwise it's still recording.
+    @discardableResult
+    func stopRecording(_ id: String) async -> Bool {
         do {
             try await client.stopRecording(id)
             markRecordingEnded(id, state: "finished", recordedDuration: nil)
             showToast("Recording stopped")
             delayedRefresh()
+            return true
         } catch {
             showToast("Stop failed: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -448,31 +473,51 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func deleteLibraryEntry(_ id: String) async {
+    @discardableResult
+    func deleteLibraryEntry(_ id: String) async -> Bool {
         do {
             try await client.deleteLibraryEntry(id)
             library.removeAll { $0.id == id }
             archiveJobs.removeAll { $0.id == id }
             if !recordings.contains(where: { $0.idString == id }) { clearResume(id) }
             showToast("Saved copy deleted")
+            return true
         } catch {
             showToast("Delete failed: \(error.localizedDescription)")
+            return false
         }
     }
 
-    func deleteBoth(_ id: String) async {
-        do {
-            try await client.deleteLibraryEntry(id)
-            library.removeAll { $0.id == id }
-            archiveJobs.removeAll { $0.id == id }
-        } catch {}
-        do {
-            try await client.deleteRecording(id)
-            recordings.removeAll { $0.idString == id }
-        } catch {}
+    /// Delete the saved copy and the Tablo copy. Each half is attempted and
+    /// reported; the resume position is only cleared once nothing is left.
+    @discardableResult
+    func deleteBoth(_ id: String) async -> Bool {
+        var failures: [String] = []
+        if library.contains(where: { $0.id == id }) {
+            do {
+                try await client.deleteLibraryEntry(id)
+                library.removeAll { $0.id == id }
+                archiveJobs.removeAll { $0.id == id }
+            } catch {
+                failures.append("saved copy: \(error.localizedDescription)")
+            }
+        }
+        if recordings.contains(where: { $0.idString == id }) {
+            do {
+                try await client.deleteRecording(id)
+                recordings.removeAll { $0.idString == id }
+            } catch {
+                failures.append("Tablo copy: \(error.localizedDescription)")
+            }
+        }
+        delayedRefresh()
+        guard failures.isEmpty else {
+            showToast("Delete failed — " + failures.joined(separator: "; "))
+            return false
+        }
         clearResume(id)
         showToast("Deleted")
-        delayedRefresh()
+        return true
     }
 
     // MARK: Resume positions

@@ -9,7 +9,6 @@ struct GuideView: View {
     @State private var selection: GuideSelection?
     @State private var now = Date()
     @State private var refreshing = false
-    private let tick = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     static let windowHours: Double = 3
     static let pxPerMinute: CGFloat = 8
@@ -63,7 +62,16 @@ struct GuideView: View {
         }
         .padding(.horizontal, 40)
         .padding(.top, 20)
-        .onReceive(tick) { now = $0 }
+        // A .task survives re-renders (it's tied to the view's identity). A
+        // Timer.publish stored on the struct was rebuilt on every store
+        // publish (tuners every 15s), restarting its 60s interval so it never
+        // fired and the now-line froze.
+        .task {
+            while !Task.isCancelled {
+                now = Date()
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
         .confirmationDialog(
             selection?.airing.showTitle ?? "",
             isPresented: Binding(get: { selection != nil }, set: { if !$0 { selection = nil } }),

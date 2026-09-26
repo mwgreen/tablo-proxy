@@ -279,6 +279,10 @@ app.get('/stream/hls/recording/:recordingId', async (req, res) => {
 // then flips between two positions and playback "jumps back".
 const seekLocks = new Map();   // sessionId -> Promise (tail of the chain)
 const seekGens = new Map();    // sessionId -> latest seek generation
+// Sessions a client stopped while a seek for them was in flight. The seek's
+// ffmpeg restart would otherwise re-register the session after the stop and
+// hold the tuner/encoder until the 5-minute reaper.
+const stoppedSessions = new Set();
 
 app.post('/api/seek/:sessionId', express.json(), async (req, res) => {
   const sid = req.params.sessionId;
@@ -304,11 +308,17 @@ app.post('/api/seek/:sessionId', express.json(), async (req, res) => {
     const dir = join(TRANSCODE_DIR, sid);
     mkdirSync(dir, { recursive: true });
     await startTranscodeWithId(sid, dir, sourceUrl, offset, live);
+    if (stoppedSessions.has(sid)) { cleanupSession(sid); return { gone: true }; }
 
-    // Wait for first segment before returning (bail if superseded meanwhile)
+    // Wait for the first segment AND the playlist before returning (bail if
+    // superseded or stopped meanwhile). ffmpeg writes stream.m3u8 a moment
+    // after seg0.m4s lands; answering in that gap hands the client a URL that
+    // 404s, and AVPlayer doesn't retry its initial playlist load.
     const seg0Path = join(dir, 'seg0.m4s');
+    const m3u8Path = join(dir, 'stream.m3u8');
     for (let i = 0; i < 300; i++) {
-      if (existsSync(seg0Path)) break;
+      if (existsSync(seg0Path) && existsSync(m3u8Path)) break;
+      if (stoppedSessions.has(sid)) { cleanupSession(sid); return { gone: true }; }
       if (seekGens.get(sid) !== gen) return { superseded: true };
       await new Promise(r => setTimeout(r, 100));
     }
@@ -539,7 +549,16 @@ app.get('/hls/:sessionId/{*path}', (req, res) => {
 
 // Stop a session
 app.post('/api/stop/:sessionId', (req, res) => {
-  cleanupSession(req.params.sessionId);
+  const sid = req.params.sessionId;
+  // If a seek is mid-restart for this session, tell it to tear down instead
+  // of bringing the session back. Session ids are never reused (a seek keeps
+  // its own id), so the marker can simply expire.
+  if (seekLocks.has(sid)) {
+    stoppedSessions.add(sid);
+    seekGens.set(sid, (seekGens.get(sid) || 0) + 1);
+    setTimeout(() => stoppedSessions.delete(sid), 60_000);
+  }
+  cleanupSession(sid);
   res.json({ ok: true });
 });
 

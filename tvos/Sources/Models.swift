@@ -69,6 +69,8 @@ struct Ignored: Decodable {
 
 struct APIError: Decodable {
     let error: String?
+    /// /api/seek: a newer seek for the same session reached the proxy first.
+    let superseded: Bool?
 }
 
 // MARK: - Channels
@@ -350,11 +352,13 @@ struct GuideAiring: Decodable, Identifiable, Hashable {
         return showTitle.isEmpty ? episodeTitle : showTitle
     }
 
+    /// "S8E2", or "E306" when there's no season. Empty when the guide has no
+    /// episode number (news, talk, paid programming) — the guide sends season 0
+    /// and no number for those, which would otherwise render as "S0E?".
     var episodeInfo: String {
-        guard season != nil || episodeNumber != nil else { return "" }
-        let s = season.map { String($0) } ?? "?"
-        let e = episodeNumber.map { String($0) } ?? "?"
-        return "S\(s)E\(e)"
+        guard let e = episodeNumber, e > 0 else { return "" }
+        if let s = season, s > 0 { return "S\(s)E\(e)" }
+        return "E\(e)"
     }
 
     func isOn(at now: Date) -> Bool { now >= start && now < end }

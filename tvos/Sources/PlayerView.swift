@@ -43,6 +43,15 @@ final class PlaybackController: ObservableObject {
     private(set) var playlistURL: URL?
     private weak var store: AppStore?
     private var gen = 0
+    /// Generation of the server seek in flight, if any. While set, the
+    /// playlist legitimately 404s (the proxy is restarting ffmpeg), so the
+    /// keepalive must not read that as a reaped session.
+    private var activeSeek: Int?
+    /// Best estimate of when the in-progress capture actually started. The
+    /// airing's scheduled start is wrong when recording began mid-airing
+    /// ("Record this episode" while it's on), so this is refined from the
+    /// device's recorded duration.
+    private var captureStart: Date?
     private var statusObs: NSKeyValueObservation?
     private var timeObserver: Any?
     private var loops: [Task<Void, Never>] = []
@@ -106,10 +115,30 @@ final class PlaybackController: ObservableObject {
         return s...e
     }
 
-    /// For an in-progress capture, how far the recording has got (wall clock).
+    /// For an in-progress capture, how far the recording has got.
     var liveEdge: Double? {
-        guard case .liveRecording(let rec, _) = mode, let start = rec.startDate else { return nil }
+        guard case .liveRecording(let rec, _) = mode, let start = captureStart ?? rec.startDate else { return nil }
         return max(0, Date().timeIntervalSince(start))
+    }
+
+    /// Refine captureStart from the device's recorded duration. Take the later
+    /// of the scheduled start and (now − recorded): a capture that began late
+    /// has recorded less than wall-clock-since-schedule. If the device doesn't
+    /// report a duration mid-capture, this stays on the scheduled start.
+    private func updateCaptureStart(_ rec: Recording, recorded: Double) {
+        let scheduled = rec.startDate
+        guard recorded > 30 else {
+            if captureStart == nil { captureStart = scheduled }
+            return
+        }
+        let estimate = Date().addingTimeInterval(-recorded)
+        if let scheduled { captureStart = max(scheduled, estimate) } else { captureStart = estimate }
+    }
+
+    private func refreshCaptureStart(_ rec: Recording) async {
+        guard let store else { return }
+        let s = try? await store.client.recordingStatus(rec.id)
+        updateCaptureStart(rec, recorded: s?.recordedDuration ?? 0)
     }
 
     // MARK: Opening
@@ -131,12 +160,14 @@ final class PlaybackController: ObservableObject {
         title = "\(ch.number) · \(ch.name)"
         subtitle = airing?.displayTitle ?? ""
         synopsis = airing?.synopsis ?? ""
-        if let rec = store.inProgressRecording(on: ch), let start = rec.startDate {
+        captureStart = nil
+        if let rec = store.inProgressRecording(on: ch), rec.startDate != nil {
             // Being recorded: play the recording stream seeked to the live
             // edge so the viewer gets full DVR controls back to its start.
             mode = .liveRecording(rec, channel: ch)
             totalDuration = rec.duration
-            let offset = max(0, Date().timeIntervalSince(start) - 5)
+            await refreshCaptureStart(rec)
+            let offset = max(0, (liveEdge ?? 0) - 5)
             await openSession(path: recordingPath(rec.id, offset: offset), offset: offset)
         } else {
             mode = .liveChannel(ch)
@@ -153,6 +184,7 @@ final class PlaybackController: ObservableObject {
         title = item.title
         subtitle = [item.episodeLine, item.channel].filter { !$0.isEmpty }.joined(separator: "  ·  ")
         synopsis = item.synopsis
+        captureStart = nil
 
         if let lib = item.lib, !item.inProgress {
             mode = .local(lib)
@@ -163,6 +195,7 @@ final class PlaybackController: ObservableObject {
             if rec.isInProgress {
                 mode = .liveRecording(rec, channel: nil)
                 totalDuration = rec.duration
+                await refreshCaptureStart(rec)
             } else {
                 mode = .recording(rec)
                 totalDuration = rec.effectiveDuration
@@ -188,9 +221,16 @@ final class PlaybackController: ObservableObject {
         player.pause()
         releaseSession()
         do {
-            let s = try await store.client.startStream(path: path)
+            // Run the start request in its own task so dismissing the player
+            // mid-start (the proxy can take 3-30s for a tuner lock and the
+            // first segments) doesn't cancel it. The proxy creates the
+            // session either way; we have to learn its id to stop it,
+            // otherwise ffmpeg and the Tablo tuner stay held until the
+            // proxy's 5-minute reaper.
+            let client = store.client
+            let s = try await Task { try await client.startStream(path: path) }.value
             guard g == gen else {
-                await store.client.stopSession(s.sessionId)
+                await client.stopSession(s.sessionId)
                 return
             }
             sessionId = s.sessionId
@@ -303,23 +343,42 @@ final class PlaybackController: ObservableObject {
         guard let store, let sid = sessionId else { return }
         gen += 1
         let g = gen
+        activeSeek = g
+        defer { if activeSeek == g { activeSeek = nil } }
         status = "Seeking to \(Fmt.clock(target))…"
         // The old playlist disappears while the proxy restarts ffmpeg; drop
         // the observer so its failure isn't reported as ours.
         statusObs = nil
         player.pause()
-        do {
-            let r = try await store.client.seek(session: sid, offset: target)
-            guard g == gen else { return }
-            serverOffset = r.startOffset
-            playlistURL = r.url
-            load(url: r.url)
-        } catch {
-            guard g == gen else { return }
-            status = nil
-            player.play()
-            store.showToast("Seek failed: \(error.localizedDescription)")
+
+        // The proxy serializes seeks per session and answers "superseded" when
+        // a newer one reached it first. If requests arrived out of order, an
+        // OLDER request of ours may have won; resend so ours is the newest.
+        for _ in 0..<3 {
+            do {
+                let r = try await store.client.seek(session: sid, offset: target)
+                guard g == gen else { return }
+                _ = await store.client.waitForPlaylist(r.url)
+                guard g == gen else { return }
+                serverOffset = r.startOffset
+                playlistURL = r.url
+                load(url: r.url)
+                return
+            } catch ProxyError.superseded {
+                guard g == gen else { return }
+                continue
+            } catch {
+                guard g == gen else { return }
+                break
+            }
         }
+
+        // The seek failed. The proxy tears the old transcode down before
+        // restarting it, so the current item's segments are gone — resuming
+        // it would leave a dead player. Open a fresh session at the target.
+        guard g == gen else { return }
+        store.showToast("Seek failed — reopening the stream")
+        await reopen(at: target)
     }
 
     func goLive() async {
@@ -370,14 +429,19 @@ final class PlaybackController: ObservableObject {
     }
 
     func checkSession() async {
-        guard let store, let url = playlistURL, !isLocal else { return }
+        guard let store, let url = playlistURL, !isLocal, activeSeek == nil else { return }
+        let g = gen
         if let alive = await store.client.playlistAlive(url), !alive {
-            await recoverExpiredSession()
+            // Re-check after the probe: a seek or reopen that started while it
+            // was in flight owns the session now.
+            guard g == gen, activeSeek == nil, playlistURL == url else { return }
+            await reopen(at: absolutePosition)
         }
     }
 
-    private func recoverExpiredSession() async {
-        let pos = absolutePosition
+    /// Open a fresh session at a position (after the proxy reaped ours, or a
+    /// server seek failed).
+    private func reopen(at pos: Double) async {
         switch mode {
         case .liveChannel(let ch):
             await openSession(path: "/stream/hls/channel/\(ch.id)", offset: 0)
@@ -412,6 +476,8 @@ final class PlaybackController: ObservableObject {
             guard let s = try? await store.client.recordingStatus(rec.id) else { continue }
             if !s.state.isEmpty && s.state != "recording" {
                 await endLiveWatch(state: s.state, recordedDuration: s.recordedDuration)
+            } else if liveRecording?.id == rec.id {
+                updateCaptureStart(rec, recorded: s.recordedDuration)
             }
         }
     }
@@ -424,8 +490,15 @@ final class PlaybackController: ObservableObject {
         guard case .liveRecording(let rec, let ch) = mode, let store else { return }
         store.markRecordingEnded(rec.idString, state: state ?? "finished", recordedDuration: recordedDuration)
 
+        // "Near live" means near where the capture actually got to — not the
+        // end of what's been transcoded, which lags on a slow encoder and is
+        // empty for a few seconds after any (re)open or seek.
         var nearLive = false
-        if let r = seekableRange {
+        if let rd = recordedDuration, rd > 0 {
+            nearLive = rd - absolutePosition < 60
+        } else if let edge = liveEdge {
+            nearLive = edge - absolutePosition < 60
+        } else if let r = seekableRange {
             let t = player.currentTime().seconds
             nearLive = (r.upperBound - (t.isFinite ? t : 0)) < 60
         }
@@ -446,7 +519,9 @@ final class PlaybackController: ObservableObject {
     /// Stop the capture we're watching (keeps the partial).
     func stopCapture() async {
         guard let store, let rec = liveRecording else { return }
-        await store.stopRecording(rec.idString)
+        // If the stop failed the capture is still running (the store already
+        // toasted why); don't pretend it ended.
+        guard await store.stopRecording(rec.idString) else { return }
         await endLiveWatch(state: "finished", recordedDuration: nil)
     }
 
@@ -458,6 +533,7 @@ final class PlaybackController: ObservableObject {
 
     func teardown() {
         gen += 1
+        activeSeek = nil
         saveResume()
         stopLoops()
         statusObs = nil
@@ -525,8 +601,11 @@ struct PlayerContainer: UIViewControllerRepresentable {
         vc.player = ctl.player
         vc.playbackControlsIncludeInfoViews = true
         vc.requiresLinearPlayback = false
+        // tvOS already adds its own "Info" tab (title, description, From
+        // Beginning) from the item's metadata, so ours gets a distinct name
+        // and shows only what that tab can't: mode, position, source.
         let info = UIHostingController(rootView: InfoPanelView(ctl: ctl, store: store))
-        info.title = "Info"
+        info.title = "Status"
         info.preferredContentSize = CGSize(width: 1920, height: 380)
         vc.customInfoViewControllers = [info]
         context.coordinator.apply(to: vc)
@@ -640,7 +719,9 @@ struct PlayerContainer: UIViewControllerRepresentable {
     }
 }
 
-/// Swipe-down panel: what's playing, where we are, and the source.
+/// Swipe-down "Status" tab: playback mode, where we are relative to the live
+/// edge or the end, and the source. Title and synopsis are left to the
+/// system's own Info tab next to it.
 struct InfoPanelView: View {
     @ObservedObject var ctl: PlaybackController
     @ObservedObject var store: AppStore
@@ -692,18 +773,12 @@ struct InfoPanelView: View {
                     if ctl.isLocal { Badge("SAVED", .green) }
                     Text(ctl.title).font(.title2).bold()
                 }
-                if !ctl.subtitle.isEmpty {
-                    Text(ctl.subtitle).font(.headline).foregroundStyle(.secondary)
-                }
-                if !ctl.synopsis.isEmpty {
-                    Text(ctl.synopsis).font(.body).foregroundStyle(.secondary).lineLimit(5)
-                }
+                Text(sourceLabel).font(.headline).foregroundStyle(.secondary)
             }
             .frame(maxWidth: 1100, alignment: .leading)
             Spacer()
             VStack(alignment: .trailing, spacing: 10) {
                 Text(positionLine).font(.title3.monospacedDigit())
-                Text(sourceLabel).font(.callout).foregroundStyle(.secondary)
                 if let ch = ctl.channel, let a = store.currentAiring(for: ch.id) {
                     Text("\(Fmt.time(a.start)) – \(Fmt.time(a.end))").font(.callout).foregroundStyle(.secondary)
                 }

@@ -49,8 +49,13 @@ compile check. A simulator build needs no signing:
       CODE_SIGNING_ALLOWED=NO build 2>&1 | grep -E 'error:|warning: .*Sources|BUILD'
 
 Paste any `error:` lines back into the session that made the change. Then run
-on the Apple TV (a simulator can't reach a LAN proxy over plain http without
-extra setup) and walk through:
+it and walk through the checks below. The tvOS simulator on a Mac on the same
+LAN reaches the proxy over plain http and plays live and recorded streams, so
+most of this works there (install with `xcrun simctl install booted
+DerivedData/Build/Products/Debug-appletvsimulator/TabloTV.app`; point it at a
+proxy with `xcrun simctl spawn booted defaults write com.mwgreen.tablotv
+baseURL http://HOST:9480`). The arrow keys drive focus; AVKit's transport-bar
+popup menus don't respond to them reliably, so check "Jump to" on the Apple TV.
 
 1. Live TV: pick a channel; the stream starts within ~10 s. Menu returns to
    the list and the proxy log shows the session stopped.

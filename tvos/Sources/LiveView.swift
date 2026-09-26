@@ -3,7 +3,6 @@ import SwiftUI
 struct LiveView: View {
     @EnvironmentObject var store: AppStore
     @State private var now = Date()
-    private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     private var tunerSummary: String {
         let inUse = store.tuners.filter { $0.inUse }.count
@@ -40,7 +39,13 @@ struct LiveView: View {
             .listStyle(.plain)
         }
         .padding(.top, 20)
-        .onReceive(tick) { now = $0 }
+        // See GuideView: a stored Timer.publish is rebuilt on every re-render.
+        .task {
+            while !Task.isCancelled {
+                now = Date()
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
     }
 }
 

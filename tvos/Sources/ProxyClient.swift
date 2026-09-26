@@ -3,6 +3,7 @@ import Combine
 
 enum ProxyError: LocalizedError {
     case badURL
+    case superseded
     case server(String)
     case http(Int)
     case decoding(String)
@@ -10,6 +11,7 @@ enum ProxyError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .badURL: return "The proxy address is not a valid URL"
+        case .superseded: return "Superseded by a newer seek"
         case .server(let msg): return msg
         case .http(let code): return "Proxy returned HTTP \(code)"
         case .decoding(let what): return "Unexpected response from the proxy (\(what))"
@@ -64,8 +66,9 @@ final class ProxyClient: ObservableObject {
         let (data, resp) = try await session.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
         if code >= 400 {
-            if let e = try? JSONDecoder().decode(APIError.self, from: data), let msg = e.error, !msg.isEmpty {
-                throw ProxyError.server(msg)
+            if let e = try? JSONDecoder().decode(APIError.self, from: data) {
+                if e.superseded == true { throw ProxyError.superseded }
+                if let msg = e.error, !msg.isEmpty { throw ProxyError.server(msg) }
             }
             throw ProxyError.http(code)
         }
@@ -199,6 +202,27 @@ final class ProxyClient: ObservableObject {
         if let e = r.error, !e.isEmpty { throw ProxyError.server(e) }
         guard let p = r.url, let u = url(p) else { throw ProxyError.decoding("seek") }
         return (u, r.startOffset)
+    }
+
+    /// Poll a freshly (re)started session's playlist until it lists a segment.
+    /// The proxy answers a seek as soon as the first segment file exists, which
+    /// can be a moment before ffmpeg writes the playlist; AVPlayer does not
+    /// retry a 404 on its initial playlist load. Mirrors the web UI's
+    /// waitForPlaylist. Returns false on timeout.
+    func waitForPlaylist(_ playlist: URL, timeout: Double = 15) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if Task.isCancelled { return false }
+            var req = URLRequest(url: playlist)
+            req.timeoutInterval = 5
+            if let (data, resp) = try? await session.data(for: req),
+               (resp as? HTTPURLResponse)?.statusCode == 200,
+               let text = String(data: data, encoding: .utf8), text.contains("#EXTINF") {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        return false
     }
 
     func stopSession(_ id: String) async {

@@ -21,6 +21,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: Tablo
+        # Versions live here: xcodegen regenerates Info.plist from this block.
+        CFBundleShortVersionString: "1.1"
         UILaunchScreen: {}
         UIUserInterfaceStyle: Dark
         # The proxy is plain http on the LAN

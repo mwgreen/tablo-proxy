@@ -58,8 +58,9 @@ struct RecordingsView: View {
                 ShowEpisodesView(group: group)
             }
             .onAppear {
-                // Like the web UI: opening the tab rescans the Tablo.
-                Task { await store.refreshRecordings() }
+                // Like the web UI, opening the tab rescans the Tablo — but not
+                // on every pop back from a detail page (see refreshRecordingsOnAppear).
+                Task { await store.refreshRecordingsOnAppear() }
             }
         }
     }
@@ -325,12 +326,15 @@ struct RecordingDetailView: View {
         ) { kind in
             Button("Delete", role: .destructive) {
                 Task {
+                    let ok: Bool
                     switch kind {
-                    case .tablo: await store.deleteRecording(item.id)
-                    case .local: await store.deleteLibraryEntry(item.id)
-                    case .both: await store.deleteBoth(item.id)
+                    case .tablo: ok = await store.deleteRecording(item.id)
+                    case .local: ok = await store.deleteLibraryEntry(item.id)
+                    case .both: ok = await store.deleteBoth(item.id)
                     }
-                    dismiss()
+                    // On failure stay on the page: the toast says what went
+                    // wrong and the item is still there.
+                    if ok { dismiss() }
                 }
             }
             Button("Cancel", role: .cancel) {}
