@@ -2,20 +2,28 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var store: AppStore
-    @Environment(\.scenePhase) private var scenePhase
+    /// Remembered across launches, so coming back lands on the same screen.
+    @AppStorage("selectedTab") private var tab = "live"
 
     var body: some View {
-        TabView {
+        TabView(selection: $tab) {
             LiveView()
                 .tabItem { Label("Live TV", systemImage: "tv") }
+                .tag("live")
             GuideView()
                 .tabItem { Label("Guide", systemImage: "calendar") }
+                .tag("guide")
             RecordingsView()
                 .tabItem { Label("Recordings", systemImage: "film.stack") }
+                .tag("recordings")
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gear") }
+                .tag("settings")
         }
-        .task { await store.loadAll() }
+        .task {
+            await store.loadAll()
+            store.restoreSession()   // relaunch after tvOS closed the app
+        }
         .task { await store.tunerLoop() }
         .task { await store.libraryLoop() }
         .task { await store.guideLoop() }
@@ -48,10 +56,18 @@ struct ContentView: View {
             guard !store.playerFullScreen, let p = store.playback?.player else { return }
             if p.rate == 0 { p.play() } else { p.pause() }
         }
-        .onChange(of: scenePhase) { _, phase in
-            // Leaving the app: stop, so the Tablo tuner and the proxy's
-            // transcode aren't held while nobody's watching.
-            if phase == .background { store.stopPlayback() }
+        // Leaving the app: remember what was playing, then stop, so the
+        // Tablo tuner and the proxy's transcode aren't held while nobody
+        // watches. Coming back: pick up where we were. (UIKit notifications:
+        // SwiftUI's scenePhase didn't report the background on tvOS here.)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            diag("didEnterBackground: saving + stopping")
+            store.saveSession()
+            store.stopPlayback()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            diag("willEnterForeground: restoring")
+            store.restoreSession()
         }
     }
 }

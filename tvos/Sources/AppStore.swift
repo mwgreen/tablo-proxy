@@ -83,7 +83,7 @@ final class AppStore: ObservableObject {
     /// Asking to play something. Setting this starts (or switches) the one
     /// app-wide playback session and shows it full screen.
     @Published var playRequest: PlayRequest? {
-        didSet { if let r = playRequest { startPlayback(r) } }
+        didSet { if let r = playRequest { startPlayback(r, fullScreen: true) } }
     }
     /// The playback session, kept alive when the full-screen player is
     /// dismissed so it continues in the mini player on the browse screens.
@@ -572,14 +572,76 @@ final class AppStore: ObservableObject {
 
     // MARK: Playback
 
-    private func startPlayback(_ req: PlayRequest) {
-        playerFullScreen = true
+    private func startPlayback(_ req: PlayRequest, fullScreen: Bool) {
+        playerFullScreen = fullScreen
         // Already playing exactly this (e.g. picking the channel that's in
         // the mini player): just go back to full screen, don't re-tune.
         if let current = playback, current.isPlaying(req) { return }
         let ctl = playback ?? PlaybackController()
         playback = ctl
         Task { await ctl.open(req, store: self) }
+    }
+
+    // MARK: Session restore (leaving and coming back to the app)
+
+    /// What was playing when the app went to the background, so coming back
+    /// (or a relaunch after tvOS closed the app) picks up where you were.
+    struct SavedSession: Codable {
+        var channelId: Int?          // live channel (or a channel being recorded)
+        var recordingId: String?     // recording / saved copy
+        var position: Double?        // where to resume a recording
+        var atLive: Bool = false     // in-progress recording, caught up with live
+        var fullScreen: Bool
+    }
+
+    private static let sessionKey = "savedSession"
+
+    /// Snapshot the current playback (or clear the snapshot if nothing plays).
+    func saveSession() {
+        var s: SavedSession?
+        if let ctl = playback, ctl.error == nil {
+            let full = playerFullScreen
+            switch ctl.mode {
+            case .liveChannel(let ch):
+                s = SavedSession(channelId: ch.id, fullScreen: full)
+            case .liveRecording(let rec, let ch):
+                if let ch, !ctl.behindLive {
+                    s = SavedSession(channelId: ch.id, fullScreen: full)
+                } else if ctl.behindLive {
+                    s = SavedSession(recordingId: rec.idString, position: ctl.absolutePosition, fullScreen: full)
+                } else {
+                    s = SavedSession(recordingId: rec.idString, atLive: true, fullScreen: full)
+                }
+            case .recording(let rec):
+                s = SavedSession(recordingId: rec.idString, position: ctl.absolutePosition, fullScreen: full)
+            case .local(let lib):
+                s = SavedSession(recordingId: lib.id, position: ctl.absolutePosition, fullScreen: full)
+            case .idle:
+                s = nil
+            }
+        }
+        let d = UserDefaults.standard
+        if let s, let data = try? JSONEncoder().encode(s) { d.set(data, forKey: AppStore.sessionKey) }
+        else { d.removeObject(forKey: AppStore.sessionKey) }
+    }
+
+    /// Resume the saved session once (after data has loaded).
+    func restoreSession() {
+        let d = UserDefaults.standard
+        guard loaded, playback == nil,
+              let data = d.data(forKey: AppStore.sessionKey),
+              let s = try? JSONDecoder().decode(SavedSession.self, from: data) else { return }
+        d.removeObject(forKey: AppStore.sessionKey)
+        let req: PlayRequest?
+        if let id = s.channelId, let ch = channel(id: id) {
+            req = PlayRequest(kind: .channel(ch))
+        } else if let id = s.recordingId, mergedItem(id) != nil {
+            req = s.atLive ? PlayRequest(kind: .recordingLive(id: id))
+                           : PlayRequest(kind: .recording(id: id, startAt: s.position))
+        } else {
+            req = nil
+        }
+        if let req { startPlayback(req, fullScreen: s.fullScreen) }
     }
 
     /// End playback entirely (the mini player's close button, leaving the app).
