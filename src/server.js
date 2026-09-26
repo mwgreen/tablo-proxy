@@ -80,9 +80,21 @@ app.get('/api/channels', (req, res) => res.json(getChannels()));
 app.get('/api/recordings', (req, res) => res.json(getRecordings()));
 app.get('/api/guide', (req, res) => res.json(getGuideData()));
 
+// When a tuner reports a capture our recordings cache doesn't have (the
+// Tablo lists a new recording a few seconds after it starts, so a rescan at
+// that moment misses it), refresh the cache in the background. Clients poll
+// tuners every ~15s, so the cache heals within about one poll.
+let tunerRescanAt = 0;
 app.get('/api/tuners', async (req, res) => {
   try {
-    res.json(await getTunerStatus());
+    const tuners = await getTunerStatus();
+    res.json(tuners);
+    const known = new Set(getRecordings().map(r => r.path));
+    const unknown = tuners.some(t => t.recording && !known.has(t.recording));
+    if (unknown && Date.now() - tunerRescanAt > 20000) {
+      tunerRescanAt = Date.now();
+      fetchRecordings().catch(e => console.warn(`[tablo] background recordings refresh failed: ${e.message}`));
+    }
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

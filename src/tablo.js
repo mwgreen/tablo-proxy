@@ -645,7 +645,13 @@ export async function startRecordingWatch(recordingId) {
   //   /recordings/sports/events/{id}      — sports event recordings
   //   /recordings/programs/{id}           — programs / specials (movies, etc.)
   // Look up the cached recording's path so we hit the right /watch endpoint.
-  const rec = recordings.find(r => String(r.id) === String(recordingId));
+  let rec = recordings.find(r => String(r.id) === String(recordingId));
+  if (!rec) {
+    // Not cached yet (e.g. a capture that just started): refresh once, or a
+    // sports event / program would be looked up under the episodes path.
+    await fetchRecordings().catch(() => {});
+    rec = recordings.find(r => String(r.id) === String(recordingId));
+  }
   const basePath = rec?.path || `/recordings/series/episodes/${recordingId}`;
   const data = await deviceRequest('POST', `${basePath}/watch`, body);
   return data.playlist_url;

@@ -238,9 +238,16 @@ final class AppStore: ObservableObject {
         return tuners.contains { $0.inUse && $0.recording && $0.channel == path }
     }
 
-    /// The in-progress capture on a channel, if any (matched by channel number).
+    /// The in-progress capture on a channel, if any. The tuner that's
+    /// recording names the capture's path, which is authoritative; fall back
+    /// to matching an in-progress recording by channel number.
     func inProgressRecording(on ch: Channel) -> Recording? {
-        recordings.first { $0.isInProgress && $0.channel.hasPrefix(ch.number + " ") }
+        let chPath = "/guide/channels/\(ch.id)"
+        if let path = tuners.first(where: { $0.inUse && $0.channel == chPath && $0.recordingPath != nil })?.recordingPath,
+           let rec = recordings.first(where: { $0.path == path }) {
+            return rec
+        }
+        return recordings.first { $0.isInProgress && $0.channel.hasPrefix(ch.number + " ") }
     }
 
     /// Is this specific airing on the device's "will record" list?

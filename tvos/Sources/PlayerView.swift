@@ -195,7 +195,17 @@ final class PlaybackController: ObservableObject {
         subtitle = airing?.displayTitle ?? ""
         synopsis = airing?.synopsis ?? ""
         captureStart = nil
-        if let rec = store.inProgressRecording(on: ch), rec.startDate != nil {
+        var capture = store.inProgressRecording(on: ch)
+        if capture == nil && store.isChannelRecording(ch.id) {
+            // A tuner is recording this channel but the recording isn't in
+            // our list yet (a capture that just started isn't listed by the
+            // Tablo for a few seconds). Rescan once so we can open its
+            // timeline instead of plain live TV.
+            status = "Finding the recording…"
+            await store.refreshRecordings(rescan: true)
+            capture = store.inProgressRecording(on: ch)
+        }
+        if let rec = capture, rec.startDate != nil {
             // Being recorded: play the recording's full timeline, opened at
             // the capture point, so you can swipe all the way back to where
             // the recording started.

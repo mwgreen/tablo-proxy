@@ -278,6 +278,9 @@ struct LibraryResponse: Decodable {
 struct Tuner: Decodable, Hashable {
     let inUse: Bool
     let recording: Bool
+    /// The capture's device path ("/recordings/sports/events/192384") — the
+    /// authoritative link from a tuner to its recording.
+    let recordingPath: String?
     let channel: String?        // "/guide/channels/123"
 
     enum CodingKeys: String, CodingKey { case inUse = "in_use", recording, channel }
@@ -286,6 +289,7 @@ struct Tuner: Decodable, Hashable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         inUse = c.truthy(.inUse)
         recording = c.truthy(.recording)
+        recordingPath = c.string(.recording)
         channel = c.string(.channel)
     }
 }
