@@ -11,3 +11,5 @@ public/test*.mp4
 swift-transcoder/.build/
 !public/icon-*.png
 !public/apple-touch-icon.png
+# ...but the tvOS app icon and Top Shelf images are real assets
+!tvos/Sources/Assets.xcassets/**/*.png
