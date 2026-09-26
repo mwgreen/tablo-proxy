@@ -37,6 +37,48 @@ Requires Xcode with the tvOS platform installed and [XcodeGen](https://github.co
 The proxy address defaults to `http://192.168.68.77:9480` and can be changed in
 the app's Settings tab.
 
+### Verifying a change
+
+The app was written and reviewed without a Swift toolchain (the sessions that
+produce it run in Linux containers), so the first build on a Mac is the
+compile check. A simulator build needs no signing:
+
+    cd tvos && xcodegen generate
+    xcodebuild -project TabloTV.xcodeproj -scheme TabloTV \
+      -destination 'generic/platform=tvOS Simulator' \
+      CODE_SIGNING_ALLOWED=NO build 2>&1 | grep -E 'error:|warning: .*Sources|BUILD'
+
+Paste any `error:` lines back into the session that made the change. Then run
+on the Apple TV (a simulator can't reach a LAN proxy over plain http without
+extra setup) and walk through:
+
+1. Live TV: pick a channel; the stream starts within ~10 s. Menu returns to
+   the list and the proxy log shows the session stopped.
+2. Live TV: hold Select on a channel — favorite toggle and record options.
+3. Guide: Earlier / Now / Later page the window; red/amber dots match the
+   web UI for the same airings; selecting a program offers Watch + record.
+4. Recordings: the three views; a recording plays, pauses, and skips with the
+   Siri remote; after ~5 s the row shows a resume position.
+5. Player: transport bar menu shows Record (channels) and Jump to
+   (recordings); Jump to a point past the transcoded range restarts the
+   stream there. Swipe down shows the info panel. Go Live appears on live
+   streams.
+6. Watch a channel that is currently recording: playback opens near the live
+   edge and can rewind; when the capture ends the player continues live.
+7. Pause a recording for 6 minutes: playback resumes without a dead player
+   (the keepalive kept the proxy session alive).
+
+### How it maps to the web UI
+
+`public/index.html` is the reference implementation for behaviour: the record
+menu order and red/amber rules (`toggleRecordShow`, `renderGuide`), the merged
+recordings model (`mergedRecordings`, `renderRecItem`), the live-recording
+hybrid (`playChannel`, `endLiveWatch`) and session keepalive/recovery. The
+tvOS counterparts are `AppStore.recordActions` / `recordMark`,
+`AppStore.mergedRecordings`, and `PlaybackController` in `PlayerView.swift`.
+Every route the app calls is in `src/server.js`; the app adds no server
+changes.
+
 ## Free Apple ID + weekly refresh
 
 A free "Personal Team" signs the app with a profile that expires after 7 days.
