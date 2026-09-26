@@ -579,6 +579,7 @@ final class AppStore: ObservableObject {
         if let current = playback, current.isPlaying(req) { return }
         let ctl = playback ?? PlaybackController()
         playback = ctl
+        ctl.prepare(for: req, store: self)
         Task { await ctl.open(req, store: self) }
     }
 

@@ -192,6 +192,26 @@ final class PlaybackController: ObservableObject {
         }
     }
 
+    /// Switch the visible state to a new request right away, before the async
+    /// open starts: the controller is reused, so otherwise the previous
+    /// show's title (and last frame) linger while the new stream starts.
+    func prepare(for req: PlayRequest, store: AppStore) {
+        self.store = store
+        error = nil
+        status = "Starting stream…"
+        subtitle = ""
+        synopsis = ""
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        switch req.kind {
+        case .channel(let ch):
+            title = "\(ch.number) · \(ch.name)"
+            subtitle = store.currentAiring(for: ch.id)?.displayTitle ?? ""
+        case .recording(let id, _), .recordingLive(let id):
+            title = store.mergedItem(id)?.title ?? ""
+        }
+    }
+
     func open(_ req: PlayRequest, store: AppStore) async {
         self.store = store
         currentRequest = req
