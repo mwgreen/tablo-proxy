@@ -127,14 +127,21 @@ final class AppStore: ObservableObject {
         await refreshScheduledAirings()
     }
 
+    /// Re-read the channel list (the Tablo's channel setup can change: a
+    /// rescan, channels turned on/off). Keeps the old list on failure.
+    func refreshChannels() async {
+        if let ch = try? await client.channels(), !ch.isEmpty, ch != channels { channels = ch }
+    }
+
     func refreshRecordings(rescan: Bool = true) async {
         if recordingsRefreshing { return }
         recordingsRefreshing = true
         defer { recordingsRefreshing = false }
         do {
             if rescan {
-                try await client.refresh(guide: false)
+                try await client.refresh(guide: false)   // rescans channels too
                 lastRescan = Date()
+                await refreshChannels()
             }
             recordings = try await client.recordings()
             await refreshLibrary()
@@ -183,6 +190,7 @@ final class AppStore: ObservableObject {
     func refreshGuide(rescan: Bool) async {
         do {
             if rescan { try await client.refresh(guide: true) }
+            await refreshChannels()
             guide = try await client.guide()
             guideLoadedAt = Date()
             if let s = try? await client.series() { seriesIndex = s }
