@@ -11,6 +11,7 @@ import {
   fetchScheduledAirings,
 } from './tablo.js';
 import { IS_LINUX, FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs } from './encode.js';
+import { Timeline } from './timeline.js';
 import {
   getLibrary, getArchiveJobs, enqueueArchive, deleteLibraryEntry, getLibraryEntry,
   libraryFilePath, libraryThumbPath,
@@ -252,8 +253,13 @@ app.get('/stream/hls/channel/:channelId', async (req, res) => {
       // tuner check failed, try anyway
     }
     const playlistUrl = await startWatch(req.params.channelId);
-    const sessionId = await startTranscode(playlistUrl, 0, true);
-    res.json({ url: `/hls/${sessionId}/stream.m3u8`, sessionId });
+    // dvr=1 (the tvOS app): keep everything since tune-in instead of a
+    // rolling window, so the player gets a recording-like timeline (pause,
+    // rewind to when you tuned in, fast-forward back to live). tvOS won't
+    // even pause a live stream whose rewind window is short.
+    const dvr = req.query.dvr === '1';
+    const sessionId = await startTranscode(playlistUrl, 0, true, dvr);
+    res.json({ url: `/hls/${sessionId}/stream.m3u8`, sessionId, dvr });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -261,6 +267,7 @@ app.get('/stream/hls/channel/:channelId', async (req, res) => {
 
 // Start transcoded HLS session for a recording
 app.get('/stream/hls/recording/:recordingId', async (req, res) => {
+  if (req.query.vod === '1') return startTimelineSession(req, res);
   try {
     const offset = parseFloat(req.query.offset) || 0;
     const playlistUrl = await startRecordingWatch(req.params.recordingId);
@@ -290,6 +297,10 @@ app.post('/api/seek/:sessionId', express.json(), async (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
+  if (sessions.get(sid).timeline) {
+    // Timeline sessions publish the whole recording; players seek natively.
+    return res.status(400).json({ error: 'Timeline sessions do not need server seeks' });
+  }
   const offset = parseFloat(req.body.offset) || 0;
   const gen = (seekGens.get(sid) || 0) + 1;
   seekGens.set(sid, gen);
@@ -300,14 +311,14 @@ app.post('/api/seek/:sessionId', express.json(), async (req, res) => {
     if (seekGens.get(sid) !== gen) return { superseded: true };
     const session = sessions.get(sid);
     if (!session) return { gone: true };
-    const { sourceUrl, live } = session;
+    const { sourceUrl, live, dvr } = session;
 
     cleanupSession(sid);
 
     // Restart transcode reusing same session ID
     const dir = join(TRANSCODE_DIR, sid);
     mkdirSync(dir, { recursive: true });
-    await startTranscodeWithId(sid, dir, sourceUrl, offset, live);
+    await startTranscodeWithId(sid, dir, sourceUrl, offset, live, dvr);
     if (stoppedSessions.has(sid)) { cleanupSession(sid); return { gone: true }; }
 
     // Wait for the first segment AND the playlist before returning (bail if
@@ -345,11 +356,57 @@ app.post('/api/seek/:sessionId', express.json(), async (req, res) => {
   res.json({ url: `/hls/${sid}/stream.m3u8?t=${Date.now()}`, startOffset: offset });
 });
 
-async function startTranscode(sourceUrl, offset = 0, live = false) {
+// Full-timeline session (see src/timeline.js). Query: start=<seconds> to
+// begin transcoding there, or live=1 for the capture point of a recording
+// that's still in progress. Responds once the init header and first segment
+// exist, with the playlist URL, the published duration, whether the
+// recording is finished, and the position the player should start at.
+async function startTimelineSession(req, res) {
+  let timeline = null;
+  let sessionId = null;
+  try {
+    const masterUrl = await startRecordingWatch(req.params.recordingId);
+    sessionId = Math.random().toString(36).slice(2, 10);
+    const dir = join(TRANSCODE_DIR, sessionId);
+    timeline = new Timeline({ id: sessionId, dir, masterUrl });
+    await timeline.init();
+    const n = timeline.segmentCount;
+    if (n === 0) throw new Error('Recording has no playable content yet');
+    let k;
+    if (req.query.live === '1') {
+      k = Math.max(0, n - 3);   // a few segments back from the capture point
+    } else {
+      const start = Math.max(0, parseFloat(req.query.start) || 0);
+      k = Math.min(n - 1, Math.floor(start / 4));
+    }
+    sessions.set(sessionId, {
+      ffmpeg: timeline,          // cleanupSession calls .kill()
+      dir, sourceUrl: masterUrl, startOffset: 0, live: false, timeline,
+    });
+    touchSession(sessionId);
+    timeline.startEncoder(k);
+    await timeline.segment(k);
+    await timeline.init_mp4();
+    res.json({
+      url: `/hls/${sessionId}/timeline.m3u8`,
+      sessionId,
+      timeline: true,
+      duration: timeline.duration,
+      finished: timeline.finished,
+      startPosition: k * 4,
+    });
+  } catch (e) {
+    if (sessionId && sessions.has(sessionId)) cleanupSession(sessionId);
+    else timeline?.cleanup();
+    res.status(500).json({ error: e.message });
+  }
+}
+
+async function startTranscode(sourceUrl, offset = 0, live = false, dvr = false) {
   const sessionId = Math.random().toString(36).slice(2, 10);
   const dir = join(TRANSCODE_DIR, sessionId);
   mkdirSync(dir, { recursive: true });
-  await startTranscodeWithId(sessionId, dir, sourceUrl, offset, live);
+  await startTranscodeWithId(sessionId, dir, sourceUrl, offset, live, dvr);
 
   // Wait for 2 segments (~8s buffer) before returning URL to client
   const seg1Path = join(dir, 'seg1.m4s');
@@ -427,7 +484,7 @@ async function computeSeekArgs(sourceUrl, offset, live = false) {
   }
 }
 
-async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false) {
+async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = false, dvr = false) {
   const outputPath = join(dir, 'stream.m3u8');
 
   if (USE_GPU) {
@@ -437,7 +494,7 @@ async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = fa
     const proc = spawn(HLS_TRANSCODE, args);
     proc.stderr.on('data', (d) => console.log(`[gpu:${sessionId}] ${d.toString().trim()}`));
     proc.on('close', (code) => console.log(`[gpu:${sessionId}] Exited with code ${code}`));
-    sessions.set(sessionId, { ffmpeg: proc, dir, sourceUrl, startOffset: offset, live });
+    sessions.set(sessionId, { ffmpeg: proc, dir, sourceUrl, startOffset: offset, live, dvr });
   } else {
     // FFmpeg with hardware-accelerated encode (+ decode on Linux)
     const hwInputArgs = getHwAccelInputArgs();
@@ -455,7 +512,7 @@ async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = fa
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
       '-f', 'hls',
       '-hls_time', '4',
-      ...(live
+      ...(live && !dvr
         // Live channel: a sliding-window LIVE playlist (finite list, segments
         // deleted as they age out, no EXT-X-PLAYLIST-TYPE). Players — including
         // iOS native HLS — open at the live edge and track it automatically,
@@ -465,8 +522,9 @@ async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = fa
             '-hls_list_size', String(LIVE_DVR_SEGMENTS),
             '-hls_flags', 'independent_segments+delete_segments+program_date_time',
           ]
-        // Recording (VOD or in-progress): append-only EVENT playlist with the
-        // full timeline seekable from the start.
+        // Recording (VOD or in-progress), or a live channel in DVR mode:
+        // append-only EVENT playlist with everything seekable from the start
+        // (for DVR, from tune-in; EXT-X-START below still opens near live).
         : [
             '-hls_list_size', '0',
             '-hls_playlist_type', 'event',
@@ -482,7 +540,7 @@ async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = fa
     const ffmpeg = spawn(FFMPEG, args);
     ffmpeg.stderr.on('data', (d) => console.log(`[ffmpeg:${sessionId}] ${d.toString().trim()}`));
     ffmpeg.on('close', (code) => console.log(`[ffmpeg:${sessionId}] Exited with code ${code}`));
-    sessions.set(sessionId, { ffmpeg, dir, sourceUrl, startOffset: offset, live });
+    sessions.set(sessionId, { ffmpeg, dir, sourceUrl, startOffset: offset, live, dvr });
   }
 
   const encoderLabel = USE_GPU ? 'GPU/Swift' : IS_LINUX ? `FFmpeg/${linuxHwAccel || 'software'}` : 'FFmpeg/VideoToolbox';
@@ -499,6 +557,46 @@ function cleanupSession(sessionId) {
   console.log(`[transcode] Session ${sessionId} cleaned up`);
 }
 
+function noStore(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+}
+
+// Timeline sessions: the playlist is generated, and segments are produced on
+// demand — a request may wait while the encoder gets there.
+async function serveTimeline(timeline, path, req, res) {
+  try {
+    if (path === 'timeline.m3u8') {
+      const body = await timeline.playlist();
+      noStore(res);
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      return res.send(body);
+    }
+    if (path === 'init.mp4') {
+      const file = await timeline.init_mp4();
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return res.sendFile(file);
+    }
+    const m = path.match(/^seg(\d+)\.m4s$/);
+    if (m) {
+      // Stop waiting if the player drops the request (it cancels read-ahead
+      // when it seeks) so the abandoned request can't restart the encoder.
+      const gone = new AbortController();
+      res.on('close', () => { if (!res.writableEnded) gone.abort(); });
+      const file = await timeline.segment(parseInt(m[1], 10), gone.signal);
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      // A segment's content never changes within a session.
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      return res.sendFile(file);
+    }
+    res.status(404).send('Not found');
+  } catch (e) {
+    if (!res.headersSent) res.status(404).send(e.message);
+  }
+}
+
 // Serve transcoded HLS files
 app.get('/hls/:sessionId/{*path}', (req, res) => {
   const session = sessions.get(req.params.sessionId);
@@ -508,6 +606,7 @@ app.get('/hls/:sessionId/{*path}', (req, res) => {
   touchSession(req.params.sessionId);
 
   const pathParam = Array.isArray(req.params.path) ? req.params.path.join('/') : req.params.path;
+  if (session.timeline) return serveTimeline(session.timeline, pathParam, req, res);
   const filePath = join(session.dir, pathParam);
   if (!filePath.startsWith(session.dir) || !existsSync(filePath)) {
     return res.status(404).send('Not found');

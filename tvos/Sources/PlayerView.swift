@@ -51,6 +51,10 @@ final class PlaybackController: ObservableObject {
     /// Far enough behind the live edge that "Go Live" is worth offering.
     /// Published only when it flips, so the transport bar is rebuilt rarely.
     @Published private(set) var behindLive = false
+    /// The stream is a full-timeline session: positions are absolute from the
+    /// recording's start and every seek is native (the proxy transcodes
+    /// whatever segment the player asks for).
+    @Published private(set) var usesTimeline = false
     /// The channel watched before the current one ("last channel").
     @Published private(set) var previousChannel: Channel?
 
@@ -141,7 +145,11 @@ final class PlaybackController: ObservableObject {
 
     /// For an in-progress capture, how far the recording has got.
     var liveEdge: Double? {
-        guard case .liveRecording(let rec, _) = mode, let start = captureStart ?? rec.startDate else { return nil }
+        guard case .liveRecording(let rec, _) = mode else { return nil }
+        // A timeline publishes up to the capture point, so the end of the
+        // seekable range is the live edge.
+        if usesTimeline, let r = seekableRange { return r.upperBound }
+        guard let start = captureStart ?? rec.startDate else { return nil }
         return max(0, Date().timeIntervalSince(start))
     }
 
@@ -188,17 +196,17 @@ final class PlaybackController: ObservableObject {
         synopsis = airing?.synopsis ?? ""
         captureStart = nil
         if let rec = store.inProgressRecording(on: ch), rec.startDate != nil {
-            // Being recorded: play the recording stream seeked to the live
-            // edge so the viewer gets full DVR controls back to its start.
+            // Being recorded: play the recording's full timeline, opened at
+            // the capture point, so you can swipe all the way back to where
+            // the recording started.
             mode = .liveRecording(rec, channel: ch)
             totalDuration = rec.duration
             await refreshCaptureStart(rec)
-            let offset = max(0, (liveEdge ?? 0) - 5)
-            await openSession(path: recordingPath(rec.id, offset: offset), offset: offset)
+            await openTimeline(rec, start: nil, live: true)
         } else {
             mode = .liveChannel(ch)
             totalDuration = 0
-            await openSession(path: "/stream/hls/channel/\(ch.id)", offset: 0)
+            await openSession(path: liveChannelPath(ch), offset: 0)
         }
     }
 
@@ -235,15 +243,62 @@ final class PlaybackController: ObservableObject {
                 mode = .recording(rec)
                 totalDuration = rec.effectiveDuration
             }
-            let start: Double
-            if atLiveEdge, let edge = liveEdge {
-                start = max(0, edge - 5)
+            if atLiveEdge && rec.isInProgress {
+                await openTimeline(rec, start: nil, live: true)
             } else {
-                start = startAt ?? store.resumePosition(for: id, duration: totalDuration)
+                let start = startAt ?? store.resumePosition(for: id, duration: totalDuration)
+                await openTimeline(rec, start: start, live: false)
             }
-            await openSession(path: recordingPath(rec.id, offset: start), offset: start)
         } else {
             fail("Recording not found")
+        }
+    }
+
+    /// Live TV as an append-only stream from tune-in (dvr=1): a recording-like
+    /// timeline where the start is when you tuned in and the end is live.
+    private func liveChannelPath(_ ch: Channel) -> String {
+        "/stream/hls/channel/\(ch.id)?dvr=1"
+    }
+
+    /// Open a recording as a full-timeline session. `live` opens an
+    /// in-progress recording at its capture point; otherwise start at `start`.
+    private func openTimeline(_ rec: Recording, start: Double?, live: Bool) async {
+        guard let store else { return }
+        gen += 1
+        let g = gen
+        status = "Starting stream…"
+        error = nil
+        statusObs = nil
+        diag("app calls pause() in openTimeline")
+        player.pause()
+        releaseSession()
+        do {
+            // Own task so dismissing mid-start can't strand the session (see openSession).
+            let client = store.client
+            let s = try await Task { try await client.startTimeline(recordingId: rec.id, start: start, live: live) }.value
+            guard g == gen else {
+                await client.stopSession(s.sessionId)
+                return
+            }
+            sessionId = s.sessionId
+            playlistURL = s.url
+            if s.info.timeline {
+                usesTimeline = true
+                serverOffset = 0
+                if s.info.finished == true, let d = s.info.duration, d > 0 { totalDuration = d }
+                // An in-progress timeline opens at the live point on its own;
+                // otherwise seek to where we asked to start.
+                load(url: s.url, seekTo: live ? nil : (start ?? s.info.startPosition))
+            } else {
+                // Older proxy without timelines: it ignored vod=1 and
+                // transcoded from the requested offset.
+                usesTimeline = false
+                serverOffset = live ? 0 : (start ?? 0)
+                load(url: s.url)
+            }
+        } catch {
+            guard g == gen else { return }
+            fail("Couldn't start the stream: \(error.localizedDescription)")
         }
     }
 
@@ -277,6 +332,7 @@ final class PlaybackController: ObservableObject {
             sessionId = s.sessionId
             playlistURL = s.url
             serverOffset = offset
+            usesTimeline = false
             load(url: s.url)
         } catch {
             guard g == gen else { return }
@@ -288,6 +344,7 @@ final class PlaybackController: ObservableObject {
         gen += 1
         releaseSession()
         serverOffset = 0
+        usesTimeline = false
         guard let url = store?.client.libraryVideoURL(lib.id) else {
             fail("The proxy address is not a valid URL")
             return
@@ -372,6 +429,14 @@ final class PlaybackController: ObservableObject {
             diag("app calls play() in seek")
             player.play()
         default:
+            if usesTimeline {
+                // The whole timeline is published: always a native seek.
+                var t = target
+                if let r = seekableRange { t = min(max(t, r.lowerBound), max(r.lowerBound, r.upperBound - 1)) }
+                _ = await player.seek(to: CMTime(seconds: t, preferredTimescale: 600))
+                player.play()
+                return
+            }
             let rel = target - serverOffset
             if let r = seekableRange, rel >= r.lowerBound, rel <= r.upperBound - 1 {
                 _ = await player.seek(to: CMTime(seconds: rel, preferredTimescale: 600))
@@ -495,9 +560,13 @@ final class PlaybackController: ObservableObject {
     private func reopen(at pos: Double) async {
         switch mode {
         case .liveChannel(let ch):
-            await openSession(path: "/stream/hls/channel/\(ch.id)", offset: 0)
+            await openSession(path: liveChannelPath(ch), offset: 0)
         case .liveRecording(let rec, _), .recording(let rec):
-            await openSession(path: recordingPath(rec.id, offset: pos), offset: pos)
+            if usesTimeline {
+                await openTimeline(rec, start: pos, live: false)
+            } else {
+                await openSession(path: recordingPath(rec.id, offset: pos), offset: pos)
+            }
         default:
             break
         }
@@ -925,9 +994,10 @@ struct PlayerContainer: UIViewControllerRepresentable {
                 sig.append("liverec")
             }
 
-            // Jump-to menu: the transport bar can only scrub what's been
-            // transcoded so far; these restart the transcode at a point.
-            if !ctl.isLocal, ctl.recordingId != nil {
+            // Jump-to menu, only for legacy (non-timeline) sessions where the
+            // transport bar can only scrub what's been transcoded so far. A
+            // timeline session scrubs the whole recording natively.
+            if !ctl.isLocal, !ctl.usesTimeline, ctl.recordingId != nil {
                 let total = ctl.totalDuration
                 var limit = total
                 if let edge = ctl.liveEdge { limit = total > 0 ? min(total, edge) : edge }

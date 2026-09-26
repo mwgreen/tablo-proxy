@@ -410,14 +410,25 @@ struct StreamStart: Decodable {
     let url: String?
     let sessionId: String?
     let error: String?
+    /// Full-timeline session (`?vod=1`): the playlist covers the whole
+    /// recording from its start, positions are absolute, no server seeks.
+    let timeline: Bool
+    let duration: Double?
+    let finished: Bool?
+    /// Where the server started transcoding; the player should begin here.
+    let startPosition: Double?
 
-    enum CodingKeys: String, CodingKey { case url, sessionId, error }
+    enum CodingKeys: String, CodingKey { case url, sessionId, error, timeline, duration, finished, startPosition }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         url = c.string(.url)
         sessionId = c.string(.sessionId)
         error = c.string(.error)
+        timeline = (try? c.decodeIfPresent(Bool.self, forKey: .timeline)) ?? false
+        duration = c.double(.duration)
+        finished = try? c.decodeIfPresent(Bool.self, forKey: .finished)
+        startPosition = c.double(.startPosition)
     }
 }
 

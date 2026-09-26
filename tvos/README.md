@@ -84,6 +84,34 @@ tvOS counterparts are `AppStore.recordActions` / `recordMark`,
 Every route the app calls is in `src/server.js`; the app adds no server
 changes.
 
+## Full timelines (how recordings and live TV play)
+
+The app asks the proxy for two stream shapes the web UI doesn't use:
+
+- **Recordings** (`/stream/hls/recording/:id?vod=1`, `src/timeline.js`): the
+  proxy publishes every 4-second segment of the whole recording up front and
+  transcodes a segment only when the player asks for it, restarting ffmpeg
+  wherever the player jumps. A finished recording is a plain VOD playlist
+  (real duration, scrub anywhere, "From Beginning" works); one still being
+  captured is an EVENT playlist from its start to the capture point, opened
+  at live. A channel that's being recorded plays this way too, so you can
+  swipe back to where the recording began.
+- **Live TV** (`/stream/hls/channel/:id?dvr=1`): an append-only playlist from
+  the moment you tune in, instead of a 6-minute rolling window. It behaves
+  like a recording whose start is when you tuned in and whose end is live.
+
+Segments from different encoder runs are interchangeable because keyframes
+are forced every 4 s (`-g 120 -force_key_frames`), `-start_number` sets the
+index, and `-output_ts_offset` + `-hls_segment_options movflags=+frag_discont`
+put absolute time in every fragment with a byte-identical init header.
+Verified with VAAPI (sanctarus) and x264 (VideoToolbox is not used for
+timelines: it ignores forced keyframes and its headers differ per run).
+
+tvOS 18.1+ won't pause a live stream while its rewind window is short
+(Apple forums thread 772697; on device: refused at 48 s, allowed at 112 s),
+so the player also handles Play/Pause and clickpad pause itself when the
+system player doesn't react (`TabloPlayerViewController`).
+
 ## App icon
 
 `icon/make_icon.swift` draws the layered home-screen icon (background glow /

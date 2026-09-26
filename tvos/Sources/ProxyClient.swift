@@ -196,6 +196,20 @@ final class ProxyClient: ObservableObject {
         return (u, sid)
     }
 
+    /// Full-timeline session for a recording (see src/timeline.js): the whole
+    /// recording is published and transcoded on demand. `start` is where to
+    /// begin; `live` asks for the capture point of an in-progress recording.
+    func startTimeline(recordingId: Int, start: Double?, live: Bool) async throws -> (url: URL, sessionId: String, info: StreamStart) {
+        var path = "/stream/hls/recording/\(recordingId)?vod=1"
+        if live { path += "&live=1" } else if let start, start > 0 { path += "&start=\(Int(start))" }
+        let s: StreamStart = try await get(path)
+        if let e = s.error, !e.isEmpty { throw ProxyError.server(e) }
+        guard let p = s.url, let sid = s.sessionId, let u = url(p) else {
+            throw ProxyError.decoding("timeline start")
+        }
+        return (u, sid, s)
+    }
+
     /// Restarts the session's transcode at an absolute offset (seconds).
     func seek(session: String, offset: Double) async throws -> (url: URL, startOffset: Double) {
         let r: SeekResponse = try await post("/api/seek/\(enc(session))", json: ["offset": offset])
