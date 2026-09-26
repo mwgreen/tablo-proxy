@@ -84,6 +84,15 @@ tvOS counterparts are `AppStore.recordActions` / `recordMark`,
 Every route the app calls is in `src/server.js`; the app adds no server
 changes.
 
+## App icon
+
+`icon/make_icon.swift` draws the layered home-screen icon (background glow /
+TV / antennas + glare + record dot, so it gets the tvOS focus parallax), the
+App Store icon, and the Top Shelf banners with Core Graphics into
+`Sources/Assets.xcassets`. Edit and re-run from `tvos/`:
+
+    swift icon/make_icon.swift
+
 ## Install on the Apple TV from the terminal
 
 With Xcode signed in (Settings → Accounts) and the Apple TV paired (Window →
