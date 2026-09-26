@@ -84,6 +84,21 @@ tvOS counterparts are `AppStore.recordActions` / `recordMark`,
 Every route the app calls is in `src/server.js`; the app adds no server
 changes.
 
+## Install on the Apple TV from the terminal
+
+With Xcode signed in (Settings → Accounts) and the Apple TV paired (Window →
+Devices and Simulators), this builds, signs, installs and launches without the
+Xcode UI. It is also a manual way to renew the free-team install:
+
+```sh
+tvos/install-appletv.sh                    # default device: "Entertainment Room"
+tvos/install-appletv.sh "Living Room"      # another paired Apple TV
+```
+
+The team id and bundle id live in `project.yml`, so regenerating the project
+keeps them. The first signing on a Mac asks for keychain access to the Apple
+Development key; choose Always Allow so unattended renewals don't hang.
+
 ## Free Apple ID + weekly refresh
 
 A free "Personal Team" signs the app with a profile that expires after 7 days.
