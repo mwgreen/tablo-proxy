@@ -38,6 +38,11 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var synopsis = ""
     @Published private(set) var totalDuration: Double = 0
     @Published private(set) var serverOffset: Double = 0
+    /// Far enough behind the live edge that "Go Live" is worth offering.
+    /// Published only when it flips, so the transport bar is rebuilt rarely.
+    @Published private(set) var behindLive = false
+    /// The channel watched before the current one ("last channel").
+    @Published private(set) var previousChannel: Channel?
 
     private(set) var sessionId: String?
     private(set) var playlistURL: URL?
@@ -150,6 +155,8 @@ final class PlaybackController: ObservableObject {
             await openChannel(ch)
         case .recording(let id, let startAt):
             await openRecording(id: id, startAt: startAt)
+        case .recordingLive(let id):
+            await openRecording(id: id, startAt: nil, atLiveEdge: true)
         }
         startLoops()
     }
@@ -176,7 +183,16 @@ final class PlaybackController: ObservableObject {
         }
     }
 
-    func openRecording(id: String, startAt: Double?) async {
+    /// Change channel from inside the player (Channels menu / last channel).
+    func switchChannel(to ch: Channel) async {
+        let current = channel
+        guard current?.id != ch.id else { return }
+        if let current { previousChannel = current }
+        behindLive = false
+        await openChannel(ch)
+    }
+
+    func openRecording(id: String, startAt: Double?, atLiveEdge: Bool = false) async {
         guard let store, let item = store.mergedItem(id) else {
             fail("Recording not found")
             return
@@ -200,7 +216,12 @@ final class PlaybackController: ObservableObject {
                 mode = .recording(rec)
                 totalDuration = rec.effectiveDuration
             }
-            let start = startAt ?? store.resumePosition(for: id, duration: totalDuration)
+            let start: Double
+            if atLiveEdge, let edge = liveEdge {
+                start = max(0, edge - 5)
+            } else {
+                start = startAt ?? store.resumePosition(for: id, duration: totalDuration)
+            }
             await openSession(path: recordingPath(rec.id, offset: start), offset: start)
         } else {
             fail("Recording not found")
@@ -381,11 +402,15 @@ final class PlaybackController: ObservableObject {
         await reopen(at: target)
     }
 
+    /// Land this far behind the very end of what's been produced: seeking to
+    /// the exact end of a live playlist stalls waiting for the next segment.
+    private let liveCushion: Double = 6
+
     func goLive() async {
         switch mode {
         case .liveChannel:
             if let r = seekableRange {
-                _ = await player.seek(to: CMTime(seconds: r.upperBound, preferredTimescale: 600))
+                _ = await player.seek(to: CMTime(seconds: max(r.lowerBound, r.upperBound - liveCushion), preferredTimescale: 600))
             }
             player.play()
         case .liveRecording:
@@ -393,7 +418,7 @@ final class PlaybackController: ObservableObject {
             // If the transcode has caught up with the capture, the end of the
             // seekable range is the live edge; otherwise restart there.
             if let r = seekableRange, serverOffset + r.upperBound >= edge - 20 {
-                _ = await player.seek(to: CMTime(seconds: r.upperBound, preferredTimescale: 600))
+                _ = await player.seek(to: CMTime(seconds: max(r.lowerBound, r.upperBound - liveCushion), preferredTimescale: 600))
                 player.play()
             } else {
                 await seek(toAbsolute: max(0, edge - 8))
@@ -529,11 +554,40 @@ final class PlaybackController: ObservableObject {
         clock.position = absolutePosition
         clock.seekableEnd = serverOffset + (seekableRange?.upperBound ?? 0)
         clock.isPlaying = player.timeControlStatus == .playing
+        updateBehindLive()
+    }
+
+    /// How far behind live we are, for the modes that have a live edge.
+    var secondsBehindLive: Double? {
+        switch mode {
+        case .liveChannel:
+            // The end of the DVR window is the live edge.
+            guard let r = seekableRange else { return nil }
+            let t = player.currentTime().seconds
+            return r.upperBound - (t.isFinite ? t : 0)
+        case .liveRecording:
+            guard let edge = liveEdge else { return nil }
+            return edge - absolutePosition
+        default:
+            return nil
+        }
+    }
+
+    /// Show Go Live past 40s behind, hide it again under 25s. The gap stops it
+    /// flickering: players naturally sit ~10-25s behind the true edge.
+    private func updateBehindLive() {
+        guard let behind = secondsBehindLive, status == nil else {
+            if behindLive && !isLive { behindLive = false }
+            return
+        }
+        let next = behindLive ? behind > 25 : behind > 40
+        if next != behindLive { behindLive = next }
     }
 
     func teardown() {
         gen += 1
         activeSeek = nil
+        behindLive = false
         saveResume()
         stopLoops()
         statusObs = nil
@@ -638,12 +692,55 @@ struct PlayerContainer: UIViewControllerRepresentable {
             guard sig != signature else { return }
             signature = sig
             vc.transportBarCustomMenuItems = items
-            vc.contextualActions = buildContextual()
+            // No persistent corner button: Apple reserves contextual actions
+            // for brief moments (Skip Intro), and one that's focused when it
+            // appears would turn the next Select press into a jump.
+            vc.contextualActions = []
         }
 
         private func buildMenu() -> ([UIMenuElement], String) {
             var items: [UIMenuElement] = []
             var sig: [String] = []
+
+            // Go Live, only while meaningfully behind the edge — the live-TV
+            // app convention: a red LIVE badge when current, a jump-to-live
+            // action in the transport bar when not.
+            if ctl.isLive && ctl.behindLive {
+                items.append(UIAction(title: "Go Live", image: UIImage(systemName: "dot.radiowaves.left.and.right")) { [ctl] _ in
+                    Task { @MainActor in await ctl.goLive() }
+                })
+                sig.append("golive")
+            }
+
+            // Channel changing while watching live TV. The Siri Remote has no
+            // channel buttons and its swipes belong to the player, so a menu
+            // plus a one-press "last channel" is the standard pattern.
+            if let current = ctl.channel {
+                if let prev = ctl.previousChannel, prev.id != current.id {
+                    items.append(UIAction(title: "Back to \(prev.number)", image: UIImage(systemName: "arrow.uturn.backward")) { [ctl] _ in
+                        Task { @MainActor in await ctl.switchChannel(to: prev) }
+                    })
+                    sig.append("prev:\(prev.id)")
+                }
+                let now = Date()
+                var chSig: [String] = []
+                let channelItems: [UIMenuElement] = store.visibleChannels.map { ch in
+                    let airing = store.currentAiring(for: ch.id, at: now)
+                    chSig.append("\(ch.id)@\(Int(airing?.start.timeIntervalSince1970 ?? 0))")
+                    var subtitle = airing?.displayTitle ?? ""
+                    if store.isChannelRecording(ch.id) { subtitle = subtitle.isEmpty ? "Recording" : "● " + subtitle }
+                    let action = UIAction(title: "\(ch.number)  \(ch.name)",
+                                          subtitle: subtitle.isEmpty ? nil : subtitle,
+                                          state: ch.id == current.id ? .on : .off) { [ctl] _ in
+                        Task { @MainActor in await ctl.switchChannel(to: ch) }
+                    }
+                    return action
+                }
+                if !channelItems.isEmpty {
+                    items.append(UIMenu(title: "Channels", image: UIImage(systemName: "list.bullet"), children: channelItems))
+                    sig.append("ch:\(current.id):" + chSig.joined(separator: ","))
+                }
+            }
 
             // Record menu for the channel being watched
             if let ch = ctl.channel {
@@ -706,15 +803,6 @@ struct PlayerContainer: UIViewControllerRepresentable {
             let raw = limit / 12
             let steps: [Double] = [300, 600, 900, 1200, 1800, 3600]
             return steps.first { $0 >= raw } ?? 3600
-        }
-
-        private func buildContextual() -> [UIAction] {
-            guard ctl.isLive else { return [] }
-            return [
-                UIAction(title: "Go Live", image: UIImage(systemName: "dot.radiowaves.left.and.right")) { [ctl] _ in
-                    Task { @MainActor in await ctl.goLive() }
-                },
-            ]
         }
     }
 }

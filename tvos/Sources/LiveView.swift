@@ -103,6 +103,7 @@ struct ChannelRow: View {
             }
             .padding(.vertical, 6)
         }
+        .focusContrast()
         .contextMenu {
             Button {
                 store.toggleFavorite(channel)

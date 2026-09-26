@@ -118,3 +118,24 @@ struct ErrorBanner: View {
         }
     }
 }
+
+/// List rows on tvOS rely on the system flipping a focused row's label to dark
+/// text on its white focus platter. After returning from the full-screen
+/// player that flip is sometimes lost and the focused row renders white on
+/// white. Apply this to the row's Button / NavigationLink: it tracks that
+/// control's focus itself (the isFocused environment value doesn't reach a
+/// List row's label reliably on tvOS) and picks the label's color scheme from
+/// it, so .primary / .secondary / .tertiary resolve correctly either way.
+struct FocusContrast: ViewModifier {
+    @FocusState private var focused: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.colorScheme, focused ? .light : .dark)
+            .focused($focused)
+    }
+}
+
+extension View {
+    func focusContrast() -> some View { modifier(FocusContrast()) }
+}

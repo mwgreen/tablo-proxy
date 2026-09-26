@@ -51,6 +51,10 @@ struct PlayRequest: Identifiable {
     enum Kind {
         case channel(Channel)
         case recording(id: String, startAt: Double?)
+        /// An in-progress recording opened at its live edge. The player works
+        /// out where the edge is (from the capture's actual start), so callers
+        /// don't compute an offset from the airing's scheduled start.
+        case recordingLive(id: String)
     }
     let id = UUID()
     let kind: Kind

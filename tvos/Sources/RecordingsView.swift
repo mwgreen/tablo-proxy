@@ -72,7 +72,7 @@ struct RecordingsView: View {
             return AppStore.byDateDesc(a, b)
         }
         return ForEach(sorted) { item in
-            NavigationLink(value: item) { RecRow(item: item) }
+            NavigationLink(value: item) { RecRow(item: item) }.focusContrast()
         }
     }
 
@@ -87,6 +87,7 @@ struct RecordingsView: View {
                 }
                 .padding(.vertical, 8)
             }
+            .focusContrast()
         }
     }
 
@@ -112,7 +113,7 @@ struct RecordingsView: View {
         return ForEach(letters, id: \.self) { letter in
             Section(letter) {
                 ForEach(byLetter[letter] ?? []) { item in
-                    NavigationLink(value: item) { RecRow(item: item) }
+                    NavigationLink(value: item) { RecRow(item: item) }.focusContrast()
                 }
             }
         }
@@ -130,7 +131,7 @@ struct ShowEpisodesView: View {
             .sorted(by: AppStore.byDateDesc)
         List {
             ForEach(items) { item in
-                NavigationLink(value: item) { RecRow(item: item) }
+                NavigationLink(value: item) { RecRow(item: item) }.focusContrast()
             }
         }
         .listStyle(.plain)
@@ -275,9 +276,9 @@ struct RecordingDetailView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
-                    if item.inProgress, let r = item.rec, let start = r.startDate {
+                    if item.inProgress, item.rec != nil {
                         Button {
-                            play(item, startAt: max(0, Date().timeIntervalSince(start) - 5))
+                            store.playRequest = PlayRequest(kind: .recordingLive(id: item.id))
                         } label: { Label("Watch live", systemImage: "dot.radiowaves.left.and.right") }
                     }
                     if resume > 0 {
