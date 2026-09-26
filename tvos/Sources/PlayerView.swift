@@ -175,8 +175,26 @@ final class PlaybackController: ObservableObject {
 
     // MARK: Opening
 
+    /// The request currently playing (for "Try again" and to recognise a
+    /// repeat request for the same thing).
+    private(set) var currentRequest: PlayRequest?
+
+    func isPlaying(_ req: PlayRequest) -> Bool {
+        guard error == nil, let cur = currentRequest else { return false }
+        switch (cur.kind, req.kind) {
+        case (.channel(let a), .channel(let b)):
+            return a.id == b.id || channel?.id == b.id
+        case (.recording(let a, _), .recording(let b, nil)),
+             (.recordingLive(let a), .recordingLive(let b)):
+            return a == b
+        default:
+            return false
+        }
+    }
+
     func open(_ req: PlayRequest, store: AppStore) async {
         self.store = store
+        currentRequest = req
         switch req.kind {
         case .channel(let ch):
             await openChannel(ch)
@@ -733,11 +751,11 @@ final class PlaybackController: ObservableObject {
 // MARK: - SwiftUI
 
 struct PlayerView: View {
-    let request: PlayRequest
+    /// Owned by the store, so playback survives dismissing this view (it
+    /// continues in the mini player).
+    @ObservedObject var ctl: PlaybackController
     @EnvironmentObject var store: AppStore
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var ctl = PlaybackController()
 
     var body: some View {
         ZStack {
@@ -749,8 +767,10 @@ struct PlayerView: View {
                     Image(systemName: "exclamationmark.triangle").font(.system(size: 60))
                     Text(err).multilineTextAlignment(.center).frame(maxWidth: 900)
                     HStack(spacing: 30) {
-                        Button("Try again") { Task { await ctl.open(request, store: store) } }
-                        Button("Close") { dismiss() }
+                        Button("Try again") {
+                            if let r = ctl.currentRequest { Task { await ctl.open(r, store: store) } }
+                        }
+                        Button("Close") { store.stopPlayback() }
                     }
                 }
                 .padding(60)
@@ -765,9 +785,8 @@ struct PlayerView: View {
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
             }
         }
-        .task { await ctl.open(request, store: store) }
-        .onDisappear { ctl.teardown() }
-        .onExitCommand { dismiss() }
+        // Menu shrinks to the mini player; playback continues.
+        .onExitCommand { store.playerFullScreen = false }
         .onPlayPauseCommand { ctl.handlePlayPause() }
         .onChange(of: scenePhase) { _, phase in
             // Coming back from the background: the proxy may have reaped the

@@ -80,7 +80,16 @@ final class AppStore: ObservableObject {
     @Published private(set) var loading = false
     @Published var lastError: String?
     @Published var toast: String?
-    @Published var playRequest: PlayRequest?
+    /// Asking to play something. Setting this starts (or switches) the one
+    /// app-wide playback session and shows it full screen.
+    @Published var playRequest: PlayRequest? {
+        didSet { if let r = playRequest { startPlayback(r) } }
+    }
+    /// The playback session, kept alive when the full-screen player is
+    /// dismissed so it continues in the mini player on the browse screens.
+    @Published private(set) var playback: PlaybackController?
+    /// Whether the player is full screen (vs the mini player).
+    @Published var playerFullScreen = false
     @Published private(set) var guideLoadedAt: Date?
 
     private var toastTask: Task<Void, Never>?
@@ -559,6 +568,25 @@ final class AppStore: ObservableObject {
             d.removeObject(forKey: key)
         }
         showToast("Resume positions cleared")
+    }
+
+    // MARK: Playback
+
+    private func startPlayback(_ req: PlayRequest) {
+        playerFullScreen = true
+        // Already playing exactly this (e.g. picking the channel that's in
+        // the mini player): just go back to full screen, don't re-tune.
+        if let current = playback, current.isPlaying(req) { return }
+        let ctl = playback ?? PlaybackController()
+        playback = ctl
+        Task { await ctl.open(req, store: self) }
+    }
+
+    /// End playback entirely (the mini player's close button, leaving the app).
+    func stopPlayback() {
+        playerFullScreen = false
+        playback?.teardown()
+        playback = nil
     }
 
     // MARK: Toast

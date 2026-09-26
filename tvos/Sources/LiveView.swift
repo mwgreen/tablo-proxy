@@ -12,7 +12,7 @@ struct LiveView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            HStack(spacing: 30) {
+            HStack(alignment: .center, spacing: 30) {
                 Text("Live TV").font(.title2).bold()
                 Spacer()
                 if !tunerSummary.isEmpty {
@@ -26,6 +26,7 @@ struct LiveView: View {
                 }
             }
             .padding(.horizontal, 40)
+            .focusSection()
 
             if store.favoritesOnly && store.favorites.isEmpty {
                 Text("No favorites yet — hold Select on a channel to add one. Showing all channels.")

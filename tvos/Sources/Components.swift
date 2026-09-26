@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 /// Small capsule tag: REC, SAVED, SAVING 42%…
 struct Badge: View {
@@ -138,4 +139,65 @@ struct FocusContrast: ViewModifier {
 
 extension View {
     func focusContrast() -> some View { modifier(FocusContrast()) }
+}
+
+// MARK: - Mini player
+
+/// Shows an AVPlayer's video without controls (the mini player). The same
+/// AVPlayer can be on screen here and in the full-screen player at once.
+struct PlayerLayerView: UIViewRepresentable {
+    let player: AVPlayer
+
+    final class LayerView: UIView {
+        override class var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    }
+
+    func makeUIView(context: Context) -> LayerView {
+        let v = LayerView()
+        v.playerLayer.videoGravity = .resizeAspect
+        v.playerLayer.player = player
+        v.backgroundColor = .black
+        return v
+    }
+
+    func updateUIView(_ v: LayerView, context: Context) {
+        if v.playerLayer.player !== player { v.playerLayer.player = player }
+    }
+}
+
+/// What's playing, as a small tile in the top-right corner beside the tab
+/// bar on every browse screen: just the video, no text or controls, and not
+/// focusable. Picking the same channel or
+/// recording again expands it (the store recognises it's already playing);
+/// Play/Pause on the remote pauses it; leaving the app stops it.
+struct MiniPlayerView: View {
+    @EnvironmentObject var store: AppStore
+
+    var body: some View {
+        if let ctl = store.playback {
+            MiniPlayerContent(ctl: ctl)
+        }
+    }
+}
+
+private struct MiniPlayerContent: View {
+    @ObservedObject var ctl: PlaybackController
+    static let size = CGSize(width: 192, height: 108)
+
+    var body: some View {
+        ZStack {
+            PlayerLayerView(player: ctl.player)
+            if ctl.error != nil {
+                Image(systemName: "exclamationmark.triangle").font(.title)
+            } else if ctl.status != nil {
+                ProgressView()
+            }
+        }
+        .frame(width: MiniPlayerContent.size.width, height: MiniPlayerContent.size.height)
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .allowsHitTesting(false)
+        .focusable(false)
+    }
 }

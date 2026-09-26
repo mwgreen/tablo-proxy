@@ -1,14 +1,29 @@
 import SwiftUI
 
+/// Which guide control has focus: a channel's label or one of its programs.
+enum GuideFocus: Hashable {
+    case label(Int)
+    case cell(Int, String)
+}
+
 /// TV guide grid: one row per channel, a fixed 3-hour window across the
-/// screen, paged with Earlier / Now / Later. Selecting a program offers to
-/// watch the channel or change its recording schedule.
+/// screen, paged with Earlier / Now / Later — or by moving past the first or
+/// last program in a row. Selecting a program offers to watch the channel or
+/// change its recording schedule.
 struct GuideView: View {
     @EnvironmentObject var store: AppStore
     @State private var windowStart: Date = GuideView.defaultWindowStart()
     @State private var selection: GuideSelection?
     @State private var now = Date()
     @State private var refreshing = false
+    @FocusState private var focus: GuideFocus?
+    /// Focus before its latest change and when that change happened: a move
+    /// command is reported after the focus engine has already acted on it.
+    @State private var prevFocus: GuideFocus?
+    @State private var focusChangedAt = Date.distantPast
+
+    /// How far one edge press moves the window.
+    static let edgeStep: TimeInterval = 90 * 60
 
     static let windowHours: Double = 3
     static let pxPerMinute: CGFloat = 8
@@ -50,6 +65,7 @@ struct GuideView: View {
                                          windowStart: windowStart,
                                          windowEnd: windowEnd,
                                          now: now,
+                                         focus: $focus,
                                          onAiring: { a in selection = GuideSelection(channel: ch, airing: a) },
                                          onChannel: { store.playRequest = PlayRequest(kind: .channel(ch)) })
                             }
@@ -57,6 +73,12 @@ struct GuideView: View {
                             timeHeader
                         }
                     }
+                }
+                .focusSection()
+                .onMoveCommand(perform: pageAtEdge)
+                .onChange(of: focus) { old, _ in
+                    prevFocus = old
+                    focusChangedAt = Date()
                 }
             }
         }
@@ -92,6 +114,61 @@ struct GuideView: View {
         }
     }
 
+    /// Moving left from a row's first program, or right from its last, pages
+    /// the window 90 minutes and keeps focus in that row on the program at
+    /// the edge that was crossed. Paging back stops at the default "now"
+    /// window, so left from the first program there still reaches the
+    /// channel label (tune in); Earlier goes further back.
+    ///
+    /// The move command arrives after the focus engine has handled it, so
+    /// judge by what focus did: right at the edge leaves focus stuck on the
+    /// last program; left at the edge carries it from the first program onto
+    /// the channel label.
+    private func pageAtEdge(_ dir: MoveCommandDirection) {
+        // Let a focus change from this same press land first.
+        DispatchQueue.main.async {
+            let moved = Date().timeIntervalSince(focusChangedAt) < 0.25
+            switch dir {
+            case .right:
+                guard !moved, case .cell(let chId, let airingId)? = focus,
+                      isEdge(chId, airingId, first: false) else { return }
+                let lastEnd = store.guide.values.compactMap { $0.last?.end }.max() ?? windowEnd
+                guard lastEnd > windowEnd else { return }
+                let anchor = windowEnd.addingTimeInterval(60)
+                windowStart = windowStart.addingTimeInterval(GuideView.edgeStep)
+                refocus(chId, at: anchor)
+            case .left:
+                let from: GuideFocus? = moved ? prevFocus : focus
+                guard case .cell(let chId, let airingId)? = from,
+                      isEdge(chId, airingId, first: true) else { return }
+                // Only when focus left the program for its row's label (or
+                // couldn't move at all).
+                if moved, focus != .label(chId) { return }
+                let floor = GuideView.defaultWindowStart()
+                guard windowStart > floor else { return }
+                let anchor = windowStart.addingTimeInterval(-60)
+                windowStart = max(floor, windowStart.addingTimeInterval(-GuideView.edgeStep))
+                refocus(chId, at: anchor)
+            default:
+                break
+            }
+        }
+    }
+
+    /// Is this the first (or last) program visible in its row?
+    private func isEdge(_ chId: Int, _ airingId: String, first: Bool) -> Bool {
+        let row = store.airings(for: chId).filter { $0.end > windowStart && $0.start < windowEnd }
+        return (first ? row.first : row.last)?.id == airingId
+    }
+
+    private func refocus(_ chId: Int, at t: Date) {
+        let airings = store.airings(for: chId)
+        let target = airings.first { $0.start <= t && $0.end > t }
+            ?? airings.first { $0.end > windowStart && $0.start < windowEnd }
+        // After the grid re-renders with the new window.
+        DispatchQueue.main.async { focus = target.map { .cell(chId, $0.id) } }
+    }
+
     private func play(_ ch: Channel) {
         // Let the dialog finish dismissing before presenting the player.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -116,6 +193,9 @@ struct GuideView: View {
         return lines.joined(separator: "\n")
     }
 
+    /// One focus section, so moving up from anywhere in the grid lands on
+    /// these buttons first (not on the tab bar when the grid column happens
+    /// to sit under it).
     private var header: some View {
         HStack(spacing: 24) {
             Text(Fmt.dayLabel(windowStart)).font(.title2).bold()
@@ -140,6 +220,7 @@ struct GuideView: View {
             }
             .disabled(refreshing)
         }
+        .focusSection()
     }
 
     private var timeHeader: some View {
@@ -169,6 +250,7 @@ struct GuideRow: View {
     let windowStart: Date
     let windowEnd: Date
     let now: Date
+    var focus: FocusState<GuideFocus?>.Binding
     let onAiring: (GuideAiring) -> Void
     let onChannel: () -> Void
 
@@ -220,6 +302,7 @@ struct GuideRow: View {
                 .frame(width: GuideView.labelWidth, height: GuideView.rowHeight, alignment: .leading)
             }
             .buttonStyle(GuideCellStyle(kind: .channel))
+            .focused(focus, equals: .label(channel.id))
 
             Spacer().frame(width: 12)
 
@@ -228,6 +311,7 @@ struct GuideRow: View {
                     ForEach(slots) { slot in
                         if let a = slot.airing {
                             GuideCell(airing: a, channel: channel, now: now) { onAiring(a) }
+                                .focused(focus, equals: .cell(channel.id, a.id))
                                 .frame(width: slot.width, height: GuideView.rowHeight)
                         } else {
                             Color.clear.frame(width: slot.width, height: GuideView.rowHeight)

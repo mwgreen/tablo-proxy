@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var store: AppStore
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         TabView {
@@ -19,6 +20,9 @@ struct ContentView: View {
         .task { await store.libraryLoop() }
         .task { await store.guideLoop() }
         .overlay(alignment: .top) { ErrorBanner() }
+        // The mini player lives in the top-right corner, level with the tab
+        // bar, so it costs the browse screens no space.
+        .overlay(alignment: .topTrailing) { MiniPlayerView() }
         .overlay(alignment: .bottom) { ToastView() }
         .overlay {
             if store.loading && !store.loaded {
@@ -31,9 +35,21 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: store.toast)
-        .fullScreenCover(item: $store.playRequest) { req in
-            PlayerView(request: req)
-                .environmentObject(store)
+        .fullScreenCover(isPresented: $store.playerFullScreen) {
+            if let ctl = store.playback {
+                PlayerView(ctl: ctl)
+                    .environmentObject(store)
+            }
+        }
+        // Play/Pause while browsing controls the mini player.
+        .onPlayPauseCommand {
+            guard !store.playerFullScreen, let p = store.playback?.player else { return }
+            if p.rate == 0 { p.play() } else { p.pause() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Leaving the app: stop, so the Tablo tuner and the proxy's
+            // transcode aren't held while nobody's watching.
+            if phase == .background { store.stopPlayback() }
         }
     }
 }

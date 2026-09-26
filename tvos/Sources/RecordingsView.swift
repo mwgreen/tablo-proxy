@@ -33,6 +33,7 @@ struct RecordingsView: View {
                     .disabled(refreshing)
                 }
                 .padding(.horizontal, 40)
+                .focusSection()
 
                 let items = store.mergedRecordings()
                 if items.isEmpty {
