@@ -1,5 +1,15 @@
 import SwiftUI
 import AVKit
+import MediaPlayer
+
+/// TEMPORARY playback diagnostics (stderr, visible via
+/// `devicectl device process launch --console`). Remove once live pause is fixed.
+func diag(_ msg: @autoclosure () -> String) {
+    #if DEBUG
+    let line = "[diag \(String(format: "%.2f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000)))] \(msg())\n"
+    FileHandle.standardError.write(line.data(using: .utf8)!)
+    #endif
+}
 
 /// Per-second playback position, kept apart from PlaybackController so the
 /// info panel can tick without re-rendering the whole player each second.
@@ -61,8 +71,17 @@ final class PlaybackController: ObservableObject {
     private var timeObserver: Any?
     private var loops: [Task<Void, Never>] = []
 
+    private var diagObs: [NSKeyValueObservation] = []
+
     init() {
         player.automaticallyWaitsToMinimizeStalling = true
+        diagObs.append(player.observe(\.timeControlStatus, options: [.new]) { p, _ in
+            let st = ["paused", "waiting", "playing"][p.timeControlStatus.rawValue]
+            diag("timeControlStatus=\(st) rate=\(p.rate) wait=\(p.reasonForWaitingToPlay?.rawValue ?? "-") seekable=\(p.currentItem?.seekableTimeRanges.map { let r = $0.timeRangeValue; return String(format: "%.1f+%.1f", r.start.seconds, r.duration.seconds) } ?? [])")
+        })
+        diagObs.append(player.observe(\.rate, options: [.new]) { p, _ in
+            diag("rate=\(p.rate)")
+        })
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 10), queue: .main) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -239,6 +258,7 @@ final class PlaybackController: ObservableObject {
         status = "Starting stream…"
         error = nil
         statusObs = nil
+        diag("app calls pause() in openSession")
         player.pause()
         releaseSession()
         do {
@@ -289,6 +309,7 @@ final class PlaybackController: ObservableObject {
         if let seekTo, seekTo > 0 {
             player.seek(to: CMTime(seconds: seekTo, preferredTimescale: 600))
         }
+        diag("app calls play() in load")
         player.play()
         status = "Buffering…"
     }
@@ -348,11 +369,13 @@ final class PlaybackController: ObservableObject {
             return
         case .local:
             _ = await player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+            diag("app calls play() in seek")
             player.play()
         default:
             let rel = target - serverOffset
             if let r = seekableRange, rel >= r.lowerBound, rel <= r.upperBound - 1 {
                 _ = await player.seek(to: CMTime(seconds: rel, preferredTimescale: 600))
+                diag("app calls play() in seek")
                 player.play()
                 return
             }
@@ -370,6 +393,7 @@ final class PlaybackController: ObservableObject {
         // The old playlist disappears while the proxy restarts ffmpeg; drop
         // the observer so its failure isn't reported as ours.
         statusObs = nil
+        diag("app calls pause() in serverSeek")
         player.pause()
 
         // The proxy serializes seeks per session and answers "superseded" when
@@ -412,6 +436,7 @@ final class PlaybackController: ObservableObject {
             if let r = seekableRange {
                 _ = await player.seek(to: CMTime(seconds: max(r.lowerBound, r.upperBound - liveCushion), preferredTimescale: 600))
             }
+            diag("app calls play() in goLive")
             player.play()
         case .liveRecording:
             guard let edge = liveEdge else { return }
@@ -419,6 +444,7 @@ final class PlaybackController: ObservableObject {
             // seekable range is the live edge; otherwise restart there.
             if let r = seekableRange, serverOffset + r.upperBound >= edge - 20 {
                 _ = await player.seek(to: CMTime(seconds: max(r.lowerBound, r.upperBound - liveCushion), preferredTimescale: 600))
+                diag("app calls play() in goLive")
                 player.play()
             } else {
                 await seek(toAbsolute: max(0, edge - 8))
@@ -541,6 +567,21 @@ final class PlaybackController: ObservableObject {
         store.showToast("Recording ended")
     }
 
+    /// The remote's Play/Pause button. With AVPlayerViewController hosted in a
+    /// SwiftUI view, SwiftUI can take this press before the player sees it
+    /// (clicking the clickpad still reaches the player). Handle it here, but
+    /// only if the player didn't react on its own, so a press that does reach
+    /// AVKit is never toggled twice.
+    func handlePlayPause() {
+        let wasPaused = player.rate == 0
+        diag("onPlayPauseCommand (remote Play/Pause) wasPaused=\(wasPaused)")
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self, (self.player.rate == 0) == wasPaused else { return }
+            if wasPaused { self.player.play() } else { self.player.pause() }
+        }
+    }
+
     /// Stop the capture we're watching (keeps the partial).
     func stopCapture() async {
         guard let store, let rec = liveRecording else { return }
@@ -550,7 +591,18 @@ final class PlaybackController: ObservableObject {
         await endLiveWatch(state: "finished", recordedDuration: nil)
     }
 
+    private var diagTicks = 0
+
     private func tick() {
+        diagTicks += 1
+        if diagTicks % 5 == 0 {
+            let sk = player.currentItem?.seekableTimeRanges.map { r -> String in
+                let t = r.timeRangeValue; return String(format: "%.1f+%.1f", t.start.seconds, t.duration.seconds)
+            } ?? []
+            let dur = player.currentItem?.duration.seconds ?? .nan
+            let focused = UIScreen.main.focusedView.map { String(describing: type(of: $0)) } ?? "nil"
+            diag("tick rate=\(player.rate) t=\(String(format: "%.1f", player.currentTime().seconds)) dur=\(dur) seekable=\(sk) focus=\(focused)")
+        }
         clock.position = absolutePosition
         clock.seekableEnd = serverOffset + (seekableRange?.upperBound ?? 0)
         clock.isPlaying = player.timeControlStatus == .playing
@@ -591,6 +643,7 @@ final class PlaybackController: ObservableObject {
         saveResume()
         stopLoops()
         statusObs = nil
+        diag("app calls pause() in teardown")
         player.pause()
         player.replaceCurrentItem(with: nil)
         releaseSession()
@@ -636,11 +689,112 @@ struct PlayerView: View {
         .task { await ctl.open(request, store: store) }
         .onDisappear { ctl.teardown() }
         .onExitCommand { dismiss() }
+        .onPlayPauseCommand { ctl.handlePlayPause() }
         .onChange(of: scenePhase) { _, phase in
             // Coming back from the background: the proxy may have reaped the
             // session while we weren't fetching segments.
             if phase == .active { Task { await ctl.checkSession() } }
         }
+    }
+}
+
+/// AVPlayerViewController that owns pause/resume.
+///
+/// On an Apple TV, tvOS's player declines to pause our live channel stream
+/// (a sliding-window LIVE playlist) even with a rewind window, while the
+/// underlying AVPlayer pauses it fine. Its internal views also consume the
+/// Play/Pause button, so a press never reaches the view controller or
+/// SwiftUI. So:
+/// - Play/Pause is taken by a gesture recognizer on our view, which sees the
+///   press before the player's internal views, and we toggle AVPlayer directly.
+/// - A clickpad click (Select) is left to the player (it also activates
+///   transport-bar buttons), but when the video itself has focus and the
+///   player didn't react, we toggle. Never twice: only if the state is unchanged.
+final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecognizerDelegate {
+    private var remoteTargets: [(MPRemoteCommand, Any)] = []
+    private var toggleInFlight = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        // The player's own recognizer takes the Play/Pause press exclusively,
+        // so ours must be allowed to recognize alongside it.
+        let tap = UITapGestureRecognizer(target: self, action: #selector(playPausePressed))
+        tap.allowedPressTypes = [NSNumber(value: UIPress.PressType.playPause.rawValue)]
+        tap.delegate = self
+        view.addGestureRecognizer(tap)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // tvOS may also deliver the button as a media remote command to the
+        // now-playing app; listen there too. All paths share one toggle.
+        let cc = MPRemoteCommandCenter.shared()
+        func add(_ cmd: MPRemoteCommand, _ name: String, play: Bool?) {
+            let token = cmd.addTarget { [weak self] _ in
+                self?.backupToggle(source: "remote command \(name)", play: play)
+                return .success
+            }
+            remoteTargets.append((cmd, token))
+        }
+        add(cc.togglePlayPauseCommand, "togglePlayPause", play: nil)
+        add(cc.pauseCommand, "pause", play: false)
+        add(cc.playCommand, "play", play: true)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        for (cmd, token) in remoteTargets { cmd.removeTarget(token) }
+        remoteTargets.removeAll()
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
+    }
+
+    @objc private func playPausePressed() {
+        backupToggle(source: "Play/Pause gesture")
+    }
+
+    /// Act on a play/pause request if the player itself doesn't. `play` is
+    /// the explicit target (play / pause commands); nil means toggle. One
+    /// action per press no matter how many paths report it.
+    private func backupToggle(source: String, play: Bool? = nil) {
+        guard let p = player else { return }
+        diag("\(source) rate=\(p.rate) inFlight=\(toggleInFlight)")
+        guard !toggleInFlight else { return }
+        let wasPaused = p.rate == 0
+        let wantPlaying = play ?? wasPaused
+        guard wantPlaying == wasPaused else { return }   // already in the requested state
+        toggleInFlight = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            defer { self?.toggleInFlight = false }
+            guard (p.rate == 0) == wasPaused else { return }   // the player handled it
+            diag("player ignored \(source); \(wantPlaying ? "playing" : "pausing") ourselves")
+            if wantPlaying { p.play() } else { p.pause() }
+        }
+    }
+
+    /// True when focus is on the video surface rather than a control in the
+    /// transport bar (Channels, Go Live, Jump to, the scrubber...).
+    private var videoHasFocus: Bool {
+        guard let v = UIScreen.main.focusedView else { return false }
+        return String(describing: type(of: v)).contains("FocusContainer")
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses where press.type == .select {
+            guard let p = player, videoHasFocus else { continue }
+            let wasPaused = p.rate == 0
+            diag("select on video; rate=\(p.rate)")
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(300))
+                guard let self, (p.rate == 0) == wasPaused, self.presentedViewController == nil else { return }
+                diag("player ignored select; toggling ourselves (wasPaused=\(wasPaused))")
+                if wasPaused { p.play() } else { p.pause() }
+            }
+        }
+        super.pressesBegan(presses, with: event)
     }
 }
 
@@ -651,7 +805,7 @@ struct PlayerContainer: UIViewControllerRepresentable {
     @ObservedObject var store: AppStore
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let vc = AVPlayerViewController()
+        let vc = TabloPlayerViewController()
         vc.player = ctl.player
         vc.playbackControlsIncludeInfoViews = true
         vc.requiresLinearPlayback = false
