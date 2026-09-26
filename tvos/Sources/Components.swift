@@ -167,10 +167,11 @@ struct PlayerLayerView: UIViewRepresentable {
 }
 
 /// What's playing, as a small tile in the top-right corner beside the tab
-/// bar on every browse screen: just the video, no text or controls, and not
-/// focusable. Picking the same channel or
-/// recording again expands it (the store recognises it's already playing);
-/// Play/Pause on the remote pauses it; leaving the app stops it.
+/// bar on every browse screen: just the video, no text. Select it to go back
+/// to the full player (reach it by moving right from the tab bar, or up from
+/// the right side of a screen). Picking the same channel or recording again
+/// also expands it; Play/Pause on the remote pauses it; leaving the app
+/// stops it.
 struct MiniPlayerView: View {
     @EnvironmentObject var store: AppStore
 
@@ -183,21 +184,24 @@ struct MiniPlayerView: View {
 
 private struct MiniPlayerContent: View {
     @ObservedObject var ctl: PlaybackController
+    @EnvironmentObject var store: AppStore
     static let size = CGSize(width: 192, height: 108)
 
     var body: some View {
-        ZStack {
-            PlayerLayerView(player: ctl.player)
-            if ctl.error != nil {
-                Image(systemName: "exclamationmark.triangle").font(.title)
-            } else if ctl.status != nil {
-                ProgressView()
+        Button {
+            store.playerFullScreen = true
+        } label: {
+            ZStack {
+                PlayerLayerView(player: ctl.player)
+                if ctl.error != nil {
+                    Image(systemName: "exclamationmark.triangle").font(.title)
+                } else if ctl.status != nil {
+                    ProgressView()
+                }
             }
+            .frame(width: MiniPlayerContent.size.width, height: MiniPlayerContent.size.height)
+            .background(Color.black)
         }
-        .frame(width: MiniPlayerContent.size.width, height: MiniPlayerContent.size.height)
-        .background(Color.black)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .allowsHitTesting(false)
-        .focusable(false)
+        .buttonStyle(.card)
     }
 }
