@@ -411,8 +411,11 @@ final class PlaybackController: ObservableObject {
             Task { @MainActor in self?.itemStatusChanged(st, message: msg) }
         }
         player.replaceCurrentItem(with: item)
-        if let seekTo, seekTo > 0 {
-            player.seek(to: CMTime(seconds: seekTo, preferredTimescale: 600))
+        // Seek whenever a start was asked for, zero included: an in-progress
+        // recording is an EVENT playlist, which AVPlayer otherwise opens at
+        // its live edge, so "from the beginning" must say so explicitly.
+        if let seekTo {
+            player.seek(to: CMTime(seconds: max(0, seekTo), preferredTimescale: 600))
         }
         diag("app calls play() in load")
         player.play()
