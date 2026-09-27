@@ -294,6 +294,15 @@ struct RecordingDetailView: View {
                             play(item, startAt: nil)
                         } label: { Label(item.inProgress ? "Play from beginning" : "Play", systemImage: "play.fill") }
                     }
+                    if store.playback != nil {
+                        Button {
+                            // A capture in progress goes in at its live edge (the
+                            // second game); anything else picks up where it was left.
+                            let kind: PlayRequest.Kind = item.inProgress && item.rec != nil
+                                ? .recordingLive(id: item.id) : .recording(id: item.id, startAt: nil)
+                            store.playInPip(PlayRequest(kind: kind))
+                        } label: { Label("Play in Picture in Picture", systemImage: "pip") }
+                    }
                     if item.inProgress {
                         Button(role: .destructive) {
                             confirmStop = true

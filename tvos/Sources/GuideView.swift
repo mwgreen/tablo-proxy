@@ -116,6 +116,9 @@ struct GuideView: View {
             presenting: selection
         ) { sel in
             Button("Watch \(sel.channel.label)") { play(sel.channel) }
+            if store.playback != nil {
+                Button("Watch \(sel.channel.label) in Picture in Picture") { play(sel.channel, pip: true) }
+            }
             let capturing = sel.airing.isOn(at: now) && store.isChannelRecording(sel.channel.id)
                 ? store.inProgressRecording(on: sel.channel) : nil
             ForEach(store.recordActions(showId: nil, airing: sel.airing, channel: sel.channel, capturing: capturing)) { action in
@@ -206,10 +209,11 @@ struct GuideView: View {
         DispatchQueue.main.async { focus = target.map { .cell(chId, $0.id) } }
     }
 
-    private func play(_ ch: Channel) {
+    private func play(_ ch: Channel, pip: Bool = false) {
         // Let the dialog finish dismissing before presenting the player.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            store.playRequest = PlayRequest(kind: .channel(ch))
+            if pip { store.playInPip(PlayRequest(kind: .channel(ch))) }
+            else { store.playRequest = PlayRequest(kind: .channel(ch)) }
         }
     }
 

@@ -790,7 +790,7 @@ struct PlayerView: View {
                         Button("Try again") {
                             if let r = ctl.currentRequest { Task { await ctl.open(r, store: store) } }
                         }
-                        Button("Close") { store.stopPlayback() }
+                        Button("Close") { store.closeMain() }
                     }
                 }
                 .padding(60)
@@ -929,17 +929,40 @@ struct PlayerContainer: UIViewControllerRepresentable {
         vc.requiresLinearPlayback = false
         // tvOS already adds its own "Info" tab (title, description, From
         // Beginning) from the item's metadata, so ours gets a distinct name
-        // and shows only what that tab can't: mode, position, source.
-        let info = UIHostingController(rootView: InfoPanelView(ctl: ctl, store: store))
+        // and shows only what that tab can't: mode, position, source. It
+        // reads the store's current main stream, so it follows a PiP swap.
+        let info = UIHostingController(rootView: InfoPanelView(store: store))
         info.title = "Status"
         info.preferredContentSize = CGSize(width: 1920, height: 380)
         vc.customInfoViewControllers = [info]
-        context.coordinator.apply(to: vc)
+        installPipOverlay(on: vc)
+        context.coordinator.apply(to: vc, ctl: ctl)
         return vc
     }
 
+    /// The picture-in-picture tile goes in AVKit's content overlay: the layer
+    /// between the video and the playback controls, so the transport bar and
+    /// the swipe-down info panel draw over it and it can never take focus.
+    private func installPipOverlay(on vc: AVPlayerViewController) {
+        vc.loadViewIfNeeded()
+        guard let overlay = vc.contentOverlayView else { return }
+        let host = UIHostingController(rootView: PipOverlayView(store: store))
+        host.view.backgroundColor = .clear
+        host.view.isUserInteractionEnabled = false
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        vc.addChild(host)
+        overlay.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.leadingAnchor.constraint(equalTo: overlay.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: overlay.trailingAnchor),
+            host.view.topAnchor.constraint(equalTo: overlay.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: overlay.bottomAnchor),
+        ])
+        host.didMove(toParent: vc)
+    }
+
     func updateUIViewController(_ vc: AVPlayerViewController, context: Context) {
-        context.coordinator.apply(to: vc)
+        context.coordinator.apply(to: vc, ctl: ctl)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -948,7 +971,7 @@ struct PlayerContainer: UIViewControllerRepresentable {
 
     @MainActor
     final class Coordinator {
-        let ctl: PlaybackController
+        private(set) var ctl: PlaybackController
         let store: AppStore
         private var signature = ""
 
@@ -958,8 +981,15 @@ struct PlayerContainer: UIViewControllerRepresentable {
         }
 
         /// Rebuild the transport bar menus only when their content changed;
-        /// replacing them while open would dismiss the menu.
-        func apply(to vc: AVPlayerViewController) {
+        /// replacing them while open would dismiss the menu. After a PiP swap
+        /// the main controller is a different object: point the system player
+        /// at its AVPlayer (both keep playing; only the roles change).
+        func apply(to vc: AVPlayerViewController, ctl: PlaybackController) {
+            if self.ctl !== ctl {
+                self.ctl = ctl
+                signature = ""
+            }
+            if vc.player !== ctl.player { vc.player = ctl.player }
             let (items, sig) = buildMenu()
             guard sig != signature else { return }
             signature = sig
@@ -1013,6 +1043,11 @@ struct PlayerContainer: UIViewControllerRepresentable {
                     sig.append("ch:\(current.id):" + chSig.joined(separator: ","))
                 }
             }
+
+            // Picture in picture: manage the second stream, or start one on a
+            // channel. (Recordings go into the corner from the Recordings
+            // screen, where they can be picked.)
+            items.append(pipMenu(&sig))
 
             // Record menu for the channel being watched
             if let ch = ctl.channel {
@@ -1072,6 +1107,68 @@ struct PlayerContainer: UIViewControllerRepresentable {
             return (items, sig.joined(separator: "|"))
         }
 
+        private func pipMenu(_ sig: inout [String]) -> UIMenu {
+            var children: [UIMenuElement] = []
+            let store = self.store
+            if let p = store.pip {
+                let what = store.pipTitle ?? "Picture in Picture"
+                children.append(UIAction(title: "Swap with \(what)", image: UIImage(systemName: "arrow.left.arrow.right")) { _ in
+                    Task { @MainActor in store.swapPip() }
+                })
+                if p.error != nil {
+                    children.append(UIAction(title: "Retry \(what)", image: UIImage(systemName: "arrow.clockwise")) { _ in
+                        Task { @MainActor in store.retryPip() }
+                    })
+                } else {
+                    children.append(UIAction(title: "Pause / resume \(what)", image: UIImage(systemName: "playpause")) { _ in
+                        Task { @MainActor in store.togglePipPause() }
+                    })
+                }
+                children.append(UIAction(title: "Close \(what)", image: UIImage(systemName: "xmark.rectangle"), attributes: [.destructive]) { _ in
+                    Task { @MainActor in store.closePip() }
+                })
+                let corners: [UIMenuElement] = PipCorner.allCases.map { c in
+                    UIAction(title: c.title, state: c == store.pipCorner ? .on : .off) { _ in
+                        Task { @MainActor in store.pipCorner = c }
+                    }
+                }
+                children.append(UIMenu(title: "Corner", image: UIImage(systemName: "rectangle.inset.topright.filled"), children: corners))
+                let sizes: [UIMenuElement] = PipSize.allCases.map { z in
+                    UIAction(title: z.title, state: z == store.pipSize ? .on : .off) { _ in
+                        Task { @MainActor in store.pipSize = z }
+                    }
+                }
+                children.append(UIMenu(title: "Size", image: UIImage(systemName: "arrow.up.left.and.arrow.down.right"), children: sizes))
+                sig.append("pip:\(what):\(p.error == nil):\(store.pipCorner.rawValue):\(store.pipSize.rawValue)")
+            } else {
+                sig.append("pip:none")
+            }
+
+            // Channels available for the corner: everything but what the main
+            // stream is already showing.
+            let mainChannel = ctl.channel?.id
+            let now = Date()
+            var chSig: [String] = []
+            let channelItems: [UIMenuElement] = store.visibleChannels.filter { $0.id != mainChannel }.map { ch in
+                let airing = store.currentAiring(for: ch.id, at: now)
+                chSig.append("\(ch.id)@\(Int(airing?.start.timeIntervalSince1970 ?? 0))")
+                var subtitle = airing?.displayTitle ?? ""
+                if store.isChannelRecording(ch.id) { subtitle = subtitle.isEmpty ? "Recording" : "● " + subtitle }
+                let isPip = store.pip?.channel?.id == ch.id
+                return UIAction(title: "\(ch.number)  \(ch.name)",
+                                subtitle: subtitle.isEmpty ? nil : subtitle,
+                                state: isPip ? .on : .off) { _ in
+                    Task { @MainActor in store.playInPip(PlayRequest(kind: .channel(ch))) }
+                }
+            }
+            if !channelItems.isEmpty {
+                children.append(UIMenu(title: store.pip == nil ? "Open a channel in the corner" : "Change the corner channel",
+                                       image: UIImage(systemName: "tv"), children: channelItems))
+                sig.append("pipch:\(store.pip?.channel?.id ?? 0):" + chSig.joined(separator: ","))
+            }
+            return UIMenu(title: "Picture in Picture", image: UIImage(systemName: "pip"), children: children)
+        }
+
         private func jumpStep(_ limit: Double) -> Double {
             let raw = limit / 12
             let steps: [Double] = [300, 600, 900, 1200, 1800, 3600]
@@ -1084,6 +1181,17 @@ struct PlayerContainer: UIViewControllerRepresentable {
 /// edge or the end, and the source. Title and synopsis are left to the
 /// system's own Info tab next to it.
 struct InfoPanelView: View {
+    @ObservedObject var store: AppStore
+
+    var body: some View {
+        if let ctl = store.playback {
+            InfoPanelBody(ctl: ctl, store: store)
+                .id(ObjectIdentifier(ctl))   // a PiP swap changes which controller is main
+        }
+    }
+}
+
+private struct InfoPanelBody: View {
     @ObservedObject var ctl: PlaybackController
     @ObservedObject var store: AppStore
     @ObservedObject var clock: PlaybackClock
@@ -1143,9 +1251,78 @@ struct InfoPanelView: View {
                 if let ch = ctl.channel, let a = store.currentAiring(for: ch.id) {
                     Text("\(Fmt.time(a.start)) – \(Fmt.time(a.end))").font(.callout).foregroundStyle(.secondary)
                 }
+                if let pipTitle = store.pipTitle {
+                    Text("Picture in picture: \(pipTitle)").font(.callout).foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.horizontal, 80)
         .padding(.vertical, 30)
+    }
+}
+
+// MARK: - Picture in picture tile
+
+/// Hosted in the player's content overlay: places the second stream's video
+/// in the chosen corner, inside the safe area, never focusable.
+struct PipOverlayView: View {
+    @ObservedObject var store: AppStore
+
+    private var alignment: Alignment {
+        switch store.pipCorner {
+        case .topLeft: return .topLeading
+        case .topRight: return .topTrailing
+        case .bottomLeft: return .bottomLeading
+        case .bottomRight: return .bottomTrailing
+        }
+    }
+
+    var body: some View {
+        ZStack(alignment: alignment) {
+            Color.clear
+            if let p = store.pip {
+                PipTile(ctl: p, width: store.pipSize.width)
+                    .padding(.horizontal, 40)
+                    .padding(.vertical, 30)
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.2), value: store.pipCorner)
+        .animation(.easeInOut(duration: 0.2), value: store.pipSize)
+    }
+}
+
+private struct PipTile: View {
+    @ObservedObject var ctl: PlaybackController
+    let width: CGFloat
+
+    var body: some View {
+        ZStack {
+            PlayerLayerView(player: ctl.player)
+            if let err = ctl.error {
+                VStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle").font(.title2)
+                    Text(err).font(.caption).multilineTextAlignment(.center).lineLimit(3)
+                    Text("Player menu › Picture in Picture › Retry or Close").font(.caption2).foregroundStyle(.secondary)
+                }
+                .padding(16)
+            } else if let s = ctl.status {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text(s).font(.caption).foregroundStyle(.secondary)
+                    if !ctl.title.isEmpty { Text(ctl.title).font(.caption).bold().lineLimit(1) }
+                }
+                .padding(16)
+            }
+        }
+        .frame(width: width, height: width * 9 / 16)
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.35), lineWidth: 2)
+        )
+        .shadow(color: .black.opacity(0.6), radius: 16, y: 6)
     }
 }

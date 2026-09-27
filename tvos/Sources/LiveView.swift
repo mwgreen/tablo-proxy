@@ -111,6 +111,13 @@ struct ChannelRow: View {
             } label: {
                 Label(fav ? "Remove from favorites" : "Add to favorites", systemImage: fav ? "star.slash" : "star")
             }
+            if store.playback != nil {
+                Button {
+                    store.playInPip(PlayRequest(kind: .channel(channel)))
+                } label: {
+                    Label("Watch in Picture in Picture", systemImage: "pip")
+                }
+            }
             let capturing = recording ? store.inProgressRecording(on: channel) : nil
             ForEach(store.recordActions(showId: nil, airing: airing, channel: channel, capturing: capturing)) { action in
                 Button(action.title, role: action.destructive ? ButtonRole.destructive : nil) {

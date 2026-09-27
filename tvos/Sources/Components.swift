@@ -191,12 +191,23 @@ private struct MiniPlayerContent: View {
         Button {
             store.playerFullScreen = true
         } label: {
-            ZStack {
+            ZStack(alignment: .bottomTrailing) {
                 PlayerLayerView(player: ctl.player)
                 if ctl.error != nil {
                     Image(systemName: "exclamationmark.triangle").font(.title)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if ctl.status != nil {
                     ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                // The corner stream keeps playing too (and holding its tuner);
+                // say so, since only the main one is shown here.
+                if store.pip != nil {
+                    Image(systemName: "pip.fill")
+                        .font(.caption2)
+                        .padding(4)
+                        .background(Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
+                        .padding(4)
                 }
             }
             .frame(width: MiniPlayerContent.size.width, height: MiniPlayerContent.size.height)

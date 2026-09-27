@@ -84,6 +84,46 @@ tvOS counterparts are `AppStore.recordActions` / `recordMark`,
 Every route the app calls is in `src/server.js`; the app adds no server
 changes.
 
+## Picture in picture (two streams)
+
+A second stream can play in a corner of the full-screen player: two live
+channels, two recordings, or one of each (a game being recorded plus a live
+one, for example). The corner stream is muted; the main one has the audio.
+
+Starting it, with something already playing:
+
+- **Live TV**: hold Select on a channel → *Watch in Picture in Picture*.
+- **Guide**: select a program → *Watch … in Picture in Picture*.
+- **Recordings**: a recording's page → *Play in Picture in Picture* (a
+  capture in progress joins at its live edge, anything else where it was left).
+- **In the player**: transport bar menu → *Picture in Picture* → *Open a
+  channel in the corner*.
+
+The *Picture in Picture* menu in the player also swaps the two (nothing is
+re-tuned: the two players keep going, only their roles and the audio change),
+pauses/resumes, retries or closes the corner stream, and picks its corner and
+size. Asking to watch what's already in the corner swaps instead of tuning a
+second copy; asking for what's already the main stream does nothing.
+
+Leaving the player (Menu) keeps both streams running; the mini player on the
+browse screens shows the main one, with a small PiP mark when a corner stream
+is also playing. Play/Pause while browsing controls the main stream. Coming
+back to the player shows both again. Leaving the app saves and stops both,
+and coming back restores both. Closing the main stream (the error screen's
+Close) promotes the corner stream to main.
+
+Limits to expect:
+
+- **Tuners.** Each live channel needs a Tablo tuner; a recording in progress
+  holds one too. Watching a channel that is being recorded reuses that
+  recording (no extra tuner). On a two-tuner Tablo, recording one game and
+  watching two other live channels is one tuner short: the corner stream shows
+  the proxy's "All tuners busy" message with Retry / Close in the menu.
+- **Encoding.** Two streams are two transcodes on the proxy host at once.
+- The tile is drawn under the system controls, so the transport bar and the
+  swipe-down panel cover it while they're up; top corners keep it clear of
+  the transport bar.
+
 ## Full timelines (how recordings and live TV play)
 
 The app asks the proxy for two stream shapes the web UI doesn't use:

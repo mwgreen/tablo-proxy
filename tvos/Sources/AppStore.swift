@@ -60,6 +60,42 @@ struct PlayRequest: Identifiable {
     let kind: Kind
 }
 
+/// Where the picture-in-picture tile sits. Top corners stay clear of the
+/// transport bar; the tile is drawn under the system's controls either way.
+enum PipCorner: String, CaseIterable {
+    case topLeft, topRight, bottomLeft, bottomRight
+
+    var title: String {
+        switch self {
+        case .topLeft: return "Top left"
+        case .topRight: return "Top right"
+        case .bottomLeft: return "Bottom left"
+        case .bottomRight: return "Bottom right"
+        }
+    }
+}
+
+enum PipSize: String, CaseIterable {
+    case small, medium, large
+
+    var title: String {
+        switch self {
+        case .small: return "Small"
+        case .medium: return "Medium"
+        case .large: return "Large"
+        }
+    }
+
+    /// 16:9 tile width in points on the 1920-wide canvas.
+    var width: CGFloat {
+        switch self {
+        case .small: return 384
+        case .medium: return 512
+        case .large: return 704
+        }
+    }
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     let client = ProxyClient()
@@ -85,11 +121,21 @@ final class AppStore: ObservableObject {
     @Published var playRequest: PlayRequest? {
         didSet { if let r = playRequest { startPlayback(r, fullScreen: true) } }
     }
-    /// The playback session, kept alive when the full-screen player is
+    /// The main playback session, kept alive when the full-screen player is
     /// dismissed so it continues in the mini player on the browse screens.
     @Published private(set) var playback: PlaybackController?
+    /// The second, muted stream shown as a picture-in-picture tile over the
+    /// main one (two games at once). It keeps playing while browsing, though
+    /// the mini player shows only the main stream.
+    @Published private(set) var pip: PlaybackController?
     /// Whether the player is full screen (vs the mini player).
     @Published var playerFullScreen = false
+    @Published var pipCorner: PipCorner {
+        didSet { UserDefaults.standard.set(pipCorner.rawValue, forKey: "pipCorner") }
+    }
+    @Published var pipSize: PipSize {
+        didSet { UserDefaults.standard.set(pipSize.rawValue, forKey: "pipSize") }
+    }
     @Published private(set) var guideLoadedAt: Date?
 
     private var toastTask: Task<Void, Never>?
@@ -98,7 +144,10 @@ final class AppStore: ObservableObject {
     private var lastRescan: Date?
 
     init() {
-        favoritesOnly = UserDefaults.standard.bool(forKey: "favoritesOnly")
+        let d = UserDefaults.standard
+        favoritesOnly = d.bool(forKey: "favoritesOnly")
+        pipCorner = PipCorner(rawValue: d.string(forKey: "pipCorner") ?? "") ?? .topRight
+        pipSize = PipSize(rawValue: d.string(forKey: "pipSize") ?? "") ?? .medium
     }
 
     // MARK: Loading
@@ -585,49 +634,156 @@ final class AppStore: ObservableObject {
         // Already playing exactly this (e.g. picking the channel that's in
         // the mini player): just go back to full screen, don't re-tune.
         if let current = playback, current.isPlaying(req) { return }
+        // It's the picture-in-picture stream: make that the main one instead
+        // of tuning a second copy.
+        if let p = pip, p.isPlaying(req) {
+            swapPip()
+            return
+        }
         let ctl = playback ?? PlaybackController()
         playback = ctl
+        ctl.player.isMuted = false
         ctl.prepare(for: req, store: self)
         Task { await ctl.open(req, store: self) }
+    }
+
+    // MARK: Picture in picture (a second stream)
+
+    /// Open something as the picture-in-picture stream beside what's playing.
+    /// With nothing playing it simply plays. Asking for what's already on
+    /// screen never tunes a second copy of it.
+    func playInPip(_ req: PlayRequest) {
+        guard let main = playback, main.error == nil || pip != nil else {
+            startPlayback(req, fullScreen: true)
+            return
+        }
+        playerFullScreen = true
+        if main.isPlaying(req) {
+            showToast("Already playing")
+            return
+        }
+        if let p = pip, p.isPlaying(req) { return }
+        let ctl = pip ?? PlaybackController()
+        pip = ctl
+        ctl.player.isMuted = true
+        ctl.prepare(for: req, store: self)
+        Task { await ctl.open(req, store: self) }
+    }
+
+    /// Exchange the main and picture-in-picture streams. Nothing is re-tuned:
+    /// the two players keep playing, only their roles (and the audio) change.
+    func swapPip() {
+        guard let main = playback, let p = pip else { return }
+        playback = p
+        pip = main
+        p.player.isMuted = false
+        main.player.isMuted = true
+        // The full-screen player keeps its own Play/Pause; a paused stream
+        // moved to the corner would otherwise sit frozen.
+        if main.player.rate == 0, main.error == nil, main.status == nil { main.player.play() }
+    }
+
+    func closePip() {
+        pip?.teardown()
+        pip = nil
+    }
+
+    /// Close the main stream. The picture-in-picture stream, if any, takes
+    /// over as the main one rather than being lost with it.
+    func closeMain() {
+        guard let main = playback else { return }
+        main.teardown()
+        if let p = pip {
+            pip = nil
+            playback = p
+            p.player.isMuted = false
+            if p.player.rate == 0, p.error == nil, p.status == nil { p.player.play() }
+        } else {
+            playback = nil
+            playerFullScreen = false
+        }
+    }
+
+    func togglePipPause() {
+        guard let p = pip else { return }
+        if p.player.rate == 0 { p.player.play() } else { p.player.pause() }
+    }
+
+    func retryPip() {
+        guard let p = pip, let r = p.currentRequest else { return }
+        p.prepare(for: r, store: self)
+        Task { await p.open(r, store: self) }
+    }
+
+    /// What the picture-in-picture stream is showing, for menus and the tile.
+    var pipTitle: String? {
+        guard let p = pip else { return nil }
+        return p.title.isEmpty ? "Picture in Picture" : p.title
     }
 
     // MARK: Session restore (leaving and coming back to the app)
 
     /// What was playing when the app went to the background, so coming back
     /// (or a relaunch after tvOS closed the app) picks up where you were.
-    struct SavedSession: Codable {
+    struct SavedStream: Codable {
         var channelId: Int?          // live channel (or a channel being recorded)
         var recordingId: String?     // recording / saved copy
         var position: Double?        // where to resume a recording
         var atLive: Bool = false     // in-progress recording, caught up with live
+    }
+
+    struct SavedSession: Codable {
+        var main: SavedStream
+        var pip: SavedStream?
         var fullScreen: Bool
     }
 
     private static let sessionKey = "savedSession"
 
-    /// Snapshot the current playback (or clear the snapshot if nothing plays).
+    private func snapshot(_ ctl: PlaybackController) -> SavedStream? {
+        guard ctl.error == nil else { return nil }
+        switch ctl.mode {
+        case .liveChannel(let ch):
+            return SavedStream(channelId: ch.id)
+        case .liveRecording(let rec, let ch):
+            if let ch, !ctl.behindLive {
+                return SavedStream(channelId: ch.id)
+            } else if ctl.behindLive {
+                return SavedStream(recordingId: rec.idString, position: ctl.absolutePosition)
+            } else {
+                return SavedStream(recordingId: rec.idString, atLive: true)
+            }
+        case .recording(let rec):
+            return SavedStream(recordingId: rec.idString, position: ctl.absolutePosition)
+        case .local(let lib):
+            return SavedStream(recordingId: lib.id, position: ctl.absolutePosition)
+        case .idle:
+            return nil
+        }
+    }
+
+    private func request(for s: SavedStream) -> PlayRequest? {
+        if let id = s.channelId, let ch = channel(id: id) {
+            return PlayRequest(kind: .channel(ch))
+        }
+        if let id = s.recordingId, mergedItem(id) != nil {
+            return s.atLive ? PlayRequest(kind: .recordingLive(id: id))
+                            : PlayRequest(kind: .recording(id: id, startAt: s.position))
+        }
+        return nil
+    }
+
+    /// Snapshot the current playback, both streams (or clear the snapshot if
+    /// nothing plays).
     func saveSession() {
         var s: SavedSession?
-        if let ctl = playback, ctl.error == nil {
-            let full = playerFullScreen
-            switch ctl.mode {
-            case .liveChannel(let ch):
-                s = SavedSession(channelId: ch.id, fullScreen: full)
-            case .liveRecording(let rec, let ch):
-                if let ch, !ctl.behindLive {
-                    s = SavedSession(channelId: ch.id, fullScreen: full)
-                } else if ctl.behindLive {
-                    s = SavedSession(recordingId: rec.idString, position: ctl.absolutePosition, fullScreen: full)
-                } else {
-                    s = SavedSession(recordingId: rec.idString, atLive: true, fullScreen: full)
-                }
-            case .recording(let rec):
-                s = SavedSession(recordingId: rec.idString, position: ctl.absolutePosition, fullScreen: full)
-            case .local(let lib):
-                s = SavedSession(recordingId: lib.id, position: ctl.absolutePosition, fullScreen: full)
-            case .idle:
-                s = nil
-            }
+        let mainSnap = playback.flatMap { snapshot($0) }
+        let pipSnap = pip.flatMap { snapshot($0) }
+        if let mainSnap {
+            s = SavedSession(main: mainSnap, pip: pipSnap, fullScreen: playerFullScreen)
+        } else if let pipSnap {
+            // Main had failed; the corner stream is what's worth coming back to.
+            s = SavedSession(main: pipSnap, pip: nil, fullScreen: playerFullScreen)
         }
         let d = UserDefaults.standard
         if let s, let data = try? JSONEncoder().encode(s) { d.set(data, forKey: AppStore.sessionKey) }
@@ -641,23 +797,21 @@ final class AppStore: ObservableObject {
               let data = d.data(forKey: AppStore.sessionKey),
               let s = try? JSONDecoder().decode(SavedSession.self, from: data) else { return }
         d.removeObject(forKey: AppStore.sessionKey)
-        let req: PlayRequest?
-        if let id = s.channelId, let ch = channel(id: id) {
-            req = PlayRequest(kind: .channel(ch))
-        } else if let id = s.recordingId, mergedItem(id) != nil {
-            req = s.atLive ? PlayRequest(kind: .recordingLive(id: id))
-                           : PlayRequest(kind: .recording(id: id, startAt: s.position))
-        } else {
-            req = nil
+        guard let mainReq = request(for: s.main) else { return }
+        startPlayback(mainReq, fullScreen: s.fullScreen)
+        if let p = s.pip, let pipReq = request(for: p) {
+            playInPip(pipReq)
+            playerFullScreen = s.fullScreen
         }
-        if let req { startPlayback(req, fullScreen: s.fullScreen) }
     }
 
-    /// End playback entirely (the mini player's close button, leaving the app).
+    /// End playback entirely, both streams (leaving the app).
     func stopPlayback() {
         playerFullScreen = false
         playback?.teardown()
         playback = nil
+        pip?.teardown()
+        pip = nil
     }
 
     // MARK: Toast
