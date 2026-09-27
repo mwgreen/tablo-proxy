@@ -56,3 +56,12 @@ export function getVideoEncodeArgs() {
   }
   return ['-c:v', 'h264_videotoolbox', '-b:v', '4M', '-profile:v', 'main', '-level', '4.0'];
 }
+
+// Keep audio locked to its timestamps. Broadcast streams sometimes deliver
+// audio that briefly overlaps itself (timestamps step backward ~10ms, seen
+// about every 95s on some live channels). The AAC encoder keeps the extra
+// samples and the muxer nudges timestamps forward, so each event plays the
+// sound a little later; over a show lip-sync drifts until a seek re-anchors
+// it. aresample's async mode trims overlaps and fills gaps with silence so
+// the audio matches its timestamps. No effect on clean audio.
+export const AUDIO_SYNC_ARGS = ['-af', 'aresample=async=1000'];

@@ -1,7 +1,7 @@
 import { spawn, execFile } from 'child_process';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync, statSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
-import { FFMPEG, FFPROBE, getHwAccelInputArgs, getVideoEncodeArgs, linuxHwAccel } from './encode.js';
+import { FFMPEG, FFPROBE, getHwAccelInputArgs, getVideoEncodeArgs, linuxHwAccel, AUDIO_SYNC_ARGS } from './encode.js';
 import { getRecordings, fetchRecordings, startRecordingWatch, deleteRecording, fetchDeviceImage } from './tablo.js';
 
 // Local recording archive. The Tablo is a capture buffer: once a recording is
@@ -153,6 +153,7 @@ async function archiveOne(id, job) {
       ...getVideoEncodeArgs(),
       '-r', '30',
       ...(linuxHwAccel === 'vaapi' ? [] : ['-pix_fmt', 'yuv420p']),
+      ...AUDIO_SYNC_ARGS,
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
       '-movflags', '+faststart',
       '-f', 'mp4',

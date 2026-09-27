@@ -19,7 +19,7 @@
 import { spawn } from 'child_process';
 import { existsSync, readdirSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs } from './encode.js';
+import { FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs, AUDIO_SYNC_ARGS } from './encode.js';
 
 
 export const SEG = 4;                 // seconds per output segment
@@ -190,6 +190,7 @@ export class Timeline {
       '-force_key_frames', `expr:gte(t,n_forced*${SEG})`,
       '-r', String(FPS),
       ...(linuxHwAccel === 'vaapi' ? [] : ['-pix_fmt', 'yuv420p']),
+      ...AUDIO_SYNC_ARGS,
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
       '-output_ts_offset', String(target),
       '-f', 'hls',
