@@ -839,6 +839,11 @@ struct PlayerView: View {
 final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecognizerDelegate {
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var toggleInFlight = false
+    /// Menu presses taken to hide the controls (not passed on).
+    private var menusHidingControls = Set<ObjectIdentifier>()
+    private weak var menuRecognizer: UIGestureRecognizer?
+    /// Leave full screen (Menu with nothing on screen but the video).
+    var onExit: (() -> Void)?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -848,6 +853,27 @@ final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecogniz
         tap.allowedPressTypes = [NSNumber(value: UIPress.PressType.playPause.rawValue)]
         tap.delegate = self
         view.addGestureRecognizer(tap)
+        // Menu while the controls are up should hide them, but here it
+        // closes the whole player: AVKit's own Menu recognizer closes it (with
+        // a transport-bar button focused), or the press reaches the
+        // full-screen cover. This recognizer, which AVKit's must wait for,
+        // holds AVKit off; pressesBegan keeps the press from the cover.
+        let menu = UITapGestureRecognizer(target: self, action: #selector(menuTakenFromAVKit))
+        menu.allowedPressTypes = [NSNumber(value: UIPress.PressType.menu.rawValue)]
+        menu.cancelsTouchesInView = false
+        menu.delegate = self
+        view.addGestureRecognizer(menu)
+        menuRecognizer = menu
+        let swipe = UIPanGestureRecognizer(target: self, action: #selector(touchedAfterHide))
+        swipe.cancelsTouchesInView = false
+        swipe.delegate = self
+        view.addGestureRecognizer(swipe)
+    }
+
+    @objc private func touchedAfterHide() { restoreControls() }
+
+    private func restoreControls() {
+        if !showsPlaybackControls { showsPlaybackControls = true }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -874,10 +900,58 @@ final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecogniz
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        true
+        g !== menuRecognizer
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+        g === menuRecognizer
+    }
+
+    /// Decided when Menu goes down (the hide changes the answer by the time
+    /// it comes up): ours, or AVKit's as usual.
+    private var menuIsOurs = false
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive press: UIPress) -> Bool {
+        if g === menuRecognizer { menuIsOurs = !showsPlaybackControls || menuShouldHideControls }
+        return true
+    }
+
+    /// Failing when it isn't ours lets AVKit's Menu recognizer, which waits
+    /// for this one, go ahead.
+    func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        g !== menuRecognizer || menuIsOurs
+    }
+
+    @objc private func menuTakenFromAVKit() {}
+
+    /// Menu hides the controls when they're up (and no transport-bar menu
+    /// is open over them, which Menu closes as usual).
+    private var menuShouldHideControls: Bool {
+        guard presentedViewController == nil else { return false }
+        if let v = UIScreen.main.focusedView,
+           String(describing: type(of: v)).contains("OverlayToolCell") { return true }
+        return controlsShowing
+    }
+
+    private weak var dimmingView: UIView?
+
+    /// AVKit has no public "controls visible": its dimming layer behind the
+    /// title and transport bar is opaque exactly while they're shown.
+    private var controlsShowing: Bool {
+        if dimmingView == nil {
+            func find(_ v: UIView) -> UIView? {
+                if String(describing: type(of: v)) == "AVNowPlayingDimmingView" { return v }
+                for c in v.subviews { if let f = find(c) { return f } }
+                return nil
+            }
+            dimmingView = find(view)
+        }
+        guard showsPlaybackControls, let d = dimmingView else { return false }
+        return !d.isHidden && d.alpha > 0.5
     }
 
     @objc private func playPausePressed() {
+        restoreControls()
         backupToggle(source: "Play/Pause gesture")
     }
 
@@ -920,7 +994,36 @@ final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecogniz
                 if wasPaused { p.play() } else { p.pause() }
             }
         }
-        super.pressesBegan(presses, with: event)
+        var rest = presses
+        for press in presses where press.type == .menu {
+            if !showsPlaybackControls {
+                // Hidden by an earlier Menu: AVKit ignores Menu while its
+                // controls are off, so leave full screen ourselves.
+                rest.remove(press)
+                menusHidingControls.insert(ObjectIdentifier(press))
+                showsPlaybackControls = true
+                onExit?()
+            } else if menuShouldHideControls {
+                rest.remove(press)
+                menusHidingControls.insert(ObjectIdentifier(press))
+                diag("menu with the controls up; hiding them")
+                // Turning them back on shows them again, so they stay off
+                // until the next press or swipe.
+                showsPlaybackControls = false
+            }
+        }
+        if rest.count == presses.count { restoreControls() }
+        if !rest.isEmpty { super.pressesBegan(rest, with: event) }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let rest = presses.filter { menusHidingControls.remove(ObjectIdentifier($0)) == nil }
+        if !rest.isEmpty { super.pressesEnded(rest, with: event) }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let rest = presses.filter { menusHidingControls.remove(ObjectIdentifier($0)) == nil }
+        if !rest.isEmpty { super.pressesCancelled(rest, with: event) }
     }
 }
 
@@ -932,6 +1035,7 @@ struct PlayerContainer: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let vc = TabloPlayerViewController()
+        vc.onExit = { [weak store] in store?.playerFullScreen = false }
         vc.player = ctl.player
         vc.playbackControlsIncludeInfoViews = true
         vc.requiresLinearPlayback = false
