@@ -657,11 +657,11 @@ final class AppStore: ObservableObject {
             startPlayback(req, fullScreen: true)
             return
         }
-        playerFullScreen = true
         if main.isPlaying(req) {
-            showToast("Already playing")
+            showToast("That's already playing")
             return
         }
+        playerFullScreen = true
         if let p = pip, p.isPlaying(req) { return }
         let ctl = pip ?? PlaybackController()
         pip = ctl
@@ -793,13 +793,16 @@ final class AppStore: ObservableObject {
     /// Resume the saved session once (after data has loaded).
     func restoreSession() {
         let d = UserDefaults.standard
-        guard loaded, playback == nil,
-              let data = d.data(forKey: AppStore.sessionKey),
-              let s = try? JSONDecoder().decode(SavedSession.self, from: data) else { return }
+        guard loaded, playback == nil, let data = d.data(forKey: AppStore.sessionKey) else { return }
         d.removeObject(forKey: AppStore.sessionKey)
-        guard let mainReq = request(for: s.main) else { return }
-        startPlayback(mainReq, fullScreen: s.fullScreen)
-        if let p = s.pip, let pipReq = request(for: p) {
+        guard let s = try? JSONDecoder().decode(SavedSession.self, from: data) else { return }
+        // A stream whose channel or recording has since gone is skipped; if
+        // only the corner stream survives it comes back as the main one.
+        let mainReq = request(for: s.main)
+        let pipReq = s.pip.flatMap { request(for: $0) }
+        guard let first = mainReq ?? pipReq else { return }
+        startPlayback(first, fullScreen: s.fullScreen)
+        if mainReq != nil, let pipReq {
             playInPip(pipReq)
             playerFullScreen = s.fullScreen
         }

@@ -1047,7 +1047,7 @@ struct PlayerContainer: UIViewControllerRepresentable {
             // Picture in picture: manage the second stream, or start one on a
             // channel. (Recordings go into the corner from the Recordings
             // screen, where they can be picked.)
-            items.append(pipMenu(&sig))
+            if let pip = pipMenu(&sig) { items.append(pip) }
 
             // Record menu for the channel being watched
             if let ch = ctl.channel {
@@ -1107,7 +1107,7 @@ struct PlayerContainer: UIViewControllerRepresentable {
             return (items, sig.joined(separator: "|"))
         }
 
-        private func pipMenu(_ sig: inout [String]) -> UIMenu {
+        private func pipMenu(_ sig: inout [String]) -> UIMenu? {
             var children: [UIMenuElement] = []
             let store = self.store
             if let p = store.pip {
@@ -1166,6 +1166,7 @@ struct PlayerContainer: UIViewControllerRepresentable {
                                        image: UIImage(systemName: "tv"), children: channelItems))
                 sig.append("pipch:\(store.pip?.channel?.id ?? 0):" + chSig.joined(separator: ","))
             }
+            guard !children.isEmpty else { return nil }
             return UIMenu(title: "Picture in Picture", image: UIImage(systemName: "pip"), children: children)
         }
 
@@ -1290,6 +1291,7 @@ struct PipOverlayView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.2), value: store.pipCorner)
         .animation(.easeInOut(duration: 0.2), value: store.pipSize)
+        .animation(.easeInOut(duration: 0.2), value: store.pip == nil)
     }
 }
 
