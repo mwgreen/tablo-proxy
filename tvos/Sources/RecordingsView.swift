@@ -291,7 +291,9 @@ struct RecordingDetailView: View {
                         } label: { Label("Play from beginning", systemImage: "backward.end.fill") }
                     } else {
                         Button {
-                            play(item, startAt: nil)
+                            // An explicit 0 for a capture in progress: nil would
+                            // count as "already playing" if it's on screen.
+                            play(item, startAt: item.inProgress ? 0 : nil)
                         } label: { Label(item.inProgress ? "Play from beginning" : "Play", systemImage: "play.fill") }
                     }
                     if store.playback != nil {

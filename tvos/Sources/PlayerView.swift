@@ -72,6 +72,8 @@ final class PlaybackController: ObservableObject {
     /// device's recorded duration.
     private var captureStart: Date?
     private var statusObs: NSKeyValueObservation?
+    /// Where the item just loaded should start, applied once it's ready.
+    private var pendingSeek: Double?
     private var timeObserver: Any?
     private var loops: [Task<Void, Never>] = []
 
@@ -408,24 +410,27 @@ final class PlaybackController: ObservableObject {
         statusObs = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             let st = item.status
             let msg = item.error?.localizedDescription
-            Task { @MainActor in self?.itemStatusChanged(st, message: msg) }
+            Task { @MainActor in self?.itemStatusChanged(item, st, message: msg) }
         }
+        // Seek whenever a start was asked for, zero included, and only once
+        // the item is ready: an in-progress recording is an EVENT playlist,
+        // which AVPlayer opens at its live edge, and a seek issued before
+        // that is overridden by the jump to live.
+        pendingSeek = seekTo.map { max(0, $0) }
         player.replaceCurrentItem(with: item)
-        // Seek whenever a start was asked for, zero included: an in-progress
-        // recording is an EVENT playlist, which AVPlayer otherwise opens at
-        // its live edge, so "from the beginning" must say so explicitly.
-        if let seekTo {
-            player.seek(to: CMTime(seconds: max(0, seekTo), preferredTimescale: 600))
-        }
         diag("app calls play() in load")
         player.play()
         status = "Buffering…"
     }
 
-    private func itemStatusChanged(_ st: AVPlayerItem.Status, message: String?) {
+    private func itemStatusChanged(_ item: AVPlayerItem, _ st: AVPlayerItem.Status, message: String?) {
         switch st {
         case .readyToPlay:
             status = nil
+            if let t = pendingSeek, player.currentItem === item {
+                pendingSeek = nil
+                player.seek(to: CMTime(seconds: t, preferredTimescale: 600))
+            }
         case .failed:
             fail("Playback failed: \(message ?? "unknown error")")
         default:
