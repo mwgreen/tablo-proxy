@@ -274,6 +274,14 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Guide data older than this is re-read when the app comes back to the
+    /// foreground (the 30-minute loop below may have slept with the device).
+    func refreshGuideIfStale(olderThan minutes: Double = 15) async {
+        guard loaded else { return }
+        if let at = guideLoadedAt, Date().timeIntervalSince(at) < minutes * 60 { return }
+        await refreshGuide(rescan: false)
+    }
+
     func guideLoop() async {
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(30 * 60))

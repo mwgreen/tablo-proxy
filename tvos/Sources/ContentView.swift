@@ -68,7 +68,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             diag("willEnterForeground: restoring")
             store.restoreSession()
-            Task { await store.refreshChannels() }
+            Task {
+                await store.refreshChannels()
+                await store.refreshGuideIfStale()
+            }
         }
     }
 }

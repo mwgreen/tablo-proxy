@@ -6,7 +6,10 @@ same ground as the web UI, laid out for the couch:
 - **Live TV** — channel list with what's on now, favorites filter (hold
   Select on a channel to star it or open its record menu), REC badges for
   channels the Tablo is capturing, tuner usage.
-- **Guide** — 3-hour grid paged with Earlier / Now / Later; each program shows
+- **Guide** — 3-hour grid paged with Now / Later (and Earlier, back to the
+  current half-hour: the guide never shows the past, and the window slides
+  forward on its own as time passes, including after a night asleep); each
+  program shows
   the schedule state the way the web UI does (red = will record or is
   recording, amber = series scheduled but Tablo is skipping this airing).
   Select a program to watch the channel or change what gets recorded.
