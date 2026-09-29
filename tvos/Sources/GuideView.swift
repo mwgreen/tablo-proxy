@@ -37,10 +37,12 @@ struct GuideView: View {
     static var gridWidth: CGFloat { CGFloat(windowHours * 60) * pxPerMinute }
 
     private var windowEnd: Date { windowStart.addingTimeInterval(GuideView.windowHours * 3600) }
+    /// Programs that have already ended aren't shown, even inside the window.
+    private var shownFrom: Date { max(windowStart, now) }
 
-    /// Half-hour boundary at or before 30 minutes ago, like the web guide.
+    /// Half-hour boundary at or before now: the guide never shows the past.
     static func defaultWindowStart(_ now: Date = Date()) -> Date {
-        let t = now.addingTimeInterval(-30 * 60)
+        let t = now
         var comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: t)
         comps.minute = (comps.minute ?? 0) < 30 ? 0 : 30
         comps.second = 0
@@ -106,7 +108,9 @@ struct GuideView: View {
         .task {
             while !Task.isCancelled {
                 now = Date()
-                try? await Task.sleep(for: .seconds(60))
+                // Wake on the minute so programs drop off as they end.
+                let intoMinute = now.timeIntervalSince1970.truncatingRemainder(dividingBy: 60)
+                try? await Task.sleep(for: .seconds(60 - intoMinute + 0.2))
             }
         }
         // The Apple TV sleeps with the app open: the minute loop above was
@@ -203,29 +207,28 @@ struct GuideView: View {
 
     /// Is this the first (or last) program visible in its row?
     private func isEdge(_ chId: Int, _ airingId: String, first: Bool) -> Bool {
-        let row = store.airings(for: chId).filter { $0.end > windowStart && $0.start < windowEnd }
+        let row = store.airings(for: chId).filter { $0.end > shownFrom && $0.start < windowEnd }
         return (first ? row.first : row.last)?.id == airingId
     }
 
     /// The guide never shows the past: the window's start can't fall behind
     /// the current half-hour, so as time passes (or after a night asleep) it
     /// slides forward and old programs drop off the left. A window paged
-    /// ahead into the future is left alone. Focus stays on the same program
-    /// while it's still in view, else moves to what's on at the new start.
+    /// ahead into the future is left alone. Ended programs drop out of the
+    /// grid; focus on one moves to what's on now.
     private func rollWindowForward() {
         let floor = GuideView.defaultWindowStart(now)
-        guard windowStart < floor else { return }
-        windowStart = floor
+        if windowStart < floor { windowStart = floor }
         if case .cell(let chId, let airingId)? = focus {
             let a = store.airings(for: chId).first { $0.id == airingId }
-            refocus(chId, at: a.map { max($0.start, floor) } ?? floor)
+            if a.map({ $0.end <= shownFrom }) ?? true { refocus(chId, at: shownFrom) }
         }
     }
 
     private func refocus(_ chId: Int, at t: Date) {
         let airings = store.airings(for: chId)
         let target = airings.first { $0.start <= t && $0.end > t }
-            ?? airings.first { $0.end > windowStart && $0.start < windowEnd }
+            ?? airings.first { $0.end > shownFrom && $0.start < windowEnd }
         // After the grid re-renders with the new window.
         DispatchQueue.main.async { focus = target.map { .cell(chId, $0.id) } }
     }
@@ -372,7 +375,8 @@ struct GuideRow: View {
         var out: [Slot] = []
         var cursor = windowStart
         let px = GuideView.pxPerMinute
-        for a in airings where a.end > windowStart && a.start < windowEnd {
+        // Ended programs are left as a gap, so the grid never offers the past.
+        for a in airings where a.end > max(windowStart, now) && a.start < windowEnd {
             let visStart = max(a.start, cursor)
             let visEnd = min(a.end, windowEnd)
             guard visEnd > visStart else { continue }
