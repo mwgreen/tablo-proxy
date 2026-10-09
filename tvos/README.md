@@ -184,8 +184,10 @@ Development key; choose Always Allow so unattended renewals don't hang.
 A free Apple ID signs apps with a profile that expires after 7 days. Signing and
 reinstalling run on **sanctarus**, which is always on, through
 [atvloadly](https://github.com/bitxeno/atvloadly) (Docker, `~/atvloadly/docker-compose.yml`,
-data in `/etc/atvloadly`). It re-signs every installed app nightly (03:00–06:30)
-and installs it on the Apple TV over Wi-Fi. A Mac isn't involved.
+data in `/etc/atvloadly`). Once an app is within 3 days of expiring
+(`advance_days`, set in its Settings), it re-signs the app and installs it on the
+Apple TV over Wi-Fi, trying every 30 minutes from 03:00 to 06:30, so a TV that
+can't be reached on one night is retried on the next. A Mac isn't involved.
 
 New code reaches the TV like this: a push to main that touches `tvos/` runs
 `.github/workflows/tvos-ipa.yml`, which builds an unsigned IPA on a GitHub macOS
