@@ -85,11 +85,17 @@ for DEV in ${DEVICE_IDS}; do
   else
     echo "${DEV}: never installed (or FORCE=1)"
   fi
-  if ! xcrun devicectl list devices --hide-headers 2>/dev/null | grep -q "${DEV}"; then
-    echo "${DEV}: not visible to devicectl; will retry next run"; continue
-  fi
-  if ! xcrun devicectl device info details --device "${DEV}" 2>/dev/null | grep -qi "connected"; then
-    echo "${DEV}: known but not connected (off? other network?); will retry next run"; continue
+  # Ask about the device directly: the device list shows the hardware UDID,
+  # not the CoreDevice identifier, so grepping it misses a configured ID.
+  # Capture first: under pipefail, grep -q quitting early fails devicectl's write.
+  DETAILS="$(xcrun devicectl device info details --device "${DEV}" 2>/dev/null)"
+  if ! grep -qi "Device State: connected" <<< "${DETAILS}"; then
+    echo "${DEV}: not reachable (off? asleep? other network?); will retry next run"
+    # The free profile expires at 7 days; say so before the app stops launching.
+    if [ -f "${STAMP}" ] && [ "${AGE_DAYS:-0}" -ge 6 ]; then
+      notify "Apple TV unreachable" "Install is ${AGE_DAYS}d old and expires at 7d"
+    fi
+    continue
   fi
   DUE+=("${DEV}")
 done

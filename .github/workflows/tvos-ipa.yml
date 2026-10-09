@@ -1,0 +1,34 @@
+# Builds the unsigned tvOS app on every push to main that touches tvos/ and
+# publishes it as a release. atvloadly on sanctarus tracks these releases
+# (asset name must contain "tvos"), re-signs with the free Apple ID, and
+# installs the update on the Apple TV within ~6 hours.
+name: tvOS IPA
+on:
+  push:
+    branches: [main]
+    paths: ['tvos/**', '.github/workflows/tvos-ipa.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: tvos-ipa
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - name: Build unsigned IPA
+        run: tvos/scripts/build-ipa.sh "$RUNNER_TEMP/TabloTV-tvos.ipa"
+      - name: Publish release (keep the newest 3)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="tvos-${{ github.run_number }}"
+          gh release create "$tag" "$RUNNER_TEMP/TabloTV-tvos.ipa" \
+            --title "TabloTV tvOS build ${{ github.run_number }}" \
+            --notes "Unsigned build of ${GITHUB_SHA::7} for atvloadly." \
+            --target "$GITHUB_SHA" --latest=false
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^tvos-' | tail -n +4 |
+            while read -r old; do gh release delete "$old" --yes --cleanup-tag; done

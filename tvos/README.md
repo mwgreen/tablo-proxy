@@ -179,35 +179,35 @@ The team id and bundle id live in `project.yml`, so regenerating the project
 keeps them. The first signing on a Mac asks for keychain access to the Apple
 Development key; choose Always Allow so unattended renewals don't hang.
 
-## Free Apple ID + weekly refresh
+## Keeping it installed: atvloadly on sanctarus
 
-A free "Personal Team" signs the app with a profile that expires after 7 days.
-`scripts/refresh.sh` rebuilds and reinstalls it from this Mac whenever the last
-install is older than 5 days (or the app source changed), and
-`scripts/com.mwgreen.tablo-tv-refresh.plist` runs it every 6 hours while the
-Mac is awake. Missed runs while asleep/off simply happen at the next wake.
+A free Apple ID signs apps with a profile that expires after 7 days. Signing and
+reinstalling run on **sanctarus**, which is always on, through
+[atvloadly](https://github.com/bitxeno/atvloadly) (Docker, `~/atvloadly/docker-compose.yml`,
+data in `/etc/atvloadly`). It re-signs every installed app nightly (03:00–06:30)
+and installs it on the Apple TV over Wi-Fi. A Mac isn't involved.
 
-One-time setup:
+New code reaches the TV like this: a push to main that touches `tvos/` runs
+`.github/workflows/tvos-ipa.yml`, which builds an unsigned IPA on a GitHub macOS
+runner (`tvos/scripts/build-ipa.sh`) and publishes it as a `tvos-N` release,
+keeping the newest 3. atvloadly checks the release every 6 hours and installs a
+new build automatically.
 
-1. Xcode > Settings > Accounts: sign in with your Apple ID.
-2. Pair the Apple TV (TV: Settings > Remotes and Devices > Remote App and
-   Devices; then Xcode > Window > Devices and Simulators).
-3. Open the project, choose your Personal Team under Signing & Capabilities,
-   and Run once on the Apple TV (registers the app ID + device, answers trust).
-4. Create `~/.config/tablo-tv/refresh.env`:
+- **Web UI:** it has no login and holds the Apple ID, so it listens on
+  localhost only: `ssh -L 5533:localhost:5533 mwgreen@192.168.68.77`, then
+  http://localhost:5533.
+- **Bundle ID:** atvloadly installs the app as `<bundle id>.<TEAM_ID>`. A copy
+  from `install-appletv.sh` is a separate app, so don't mix the two.
+- **After a tvOS update,** re-pair the Apple TV in atvloadly (TV: Settings >
+  Remotes and Devices > Remote App and Devices).
+- **Limit:** a free Apple ID keeps at most 3 apps active at once. TabloTV and
+  StreamingFinder (tomato-streams) use two.
 
-       TEAM_ID=ABCDE12345            # Xcode > Settings > Accounts > your team's ID
-       DEVICE_IDS="<UDID> <UDID>"    # from: xcrun devicectl list devices — one per Apple TV
 
-5. Install the agent:
+### Fallback: refresh from the Mac (retired)
 
-       cp scripts/com.mwgreen.tablo-tv-refresh.plist ~/Library/LaunchAgents/
-       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mwgreen.tablo-tv-refresh.plist
-
-Several Apple TVs: pair each one with Xcode once (step 2) and list all their
-UDIDs in `DEVICE_IDS`. One build covers them all; an Apple TV that's off during
-a run is skipped and caught up on a later one.
-
-Log: `~/Library/Application Support/tablo-tv-refresh/refresh.log`. Failures
-(usually Apple wanting you to sign in again) pop a macOS notification.
-Force a rebuild any time with `FORCE=1 scripts/refresh.sh`.
+`scripts/refresh.sh` with the launchd agent `scripts/com.mwgreen.tablo-tv-refresh.plist`
+rebuilt and reinstalled the app from the Mac with Xcode signing. It's turned off
+(the plist is parked in `~/Library/LaunchAgents/disabled/`) so it doesn't use
+up the Apple ID's app and certificate slots alongside atvloadly. Its setup notes
+are in the header of `scripts/refresh.sh`.
