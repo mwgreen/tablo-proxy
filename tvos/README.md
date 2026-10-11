@@ -108,6 +108,10 @@ pauses/resumes, retries or closes the corner stream, and picks its corner and
 size. Asking to watch what's already in the corner swaps instead of tuning a
 second copy; asking for what's already the main stream does nothing.
 
+Quicker: Up once brings up the transport bar's menu row, Up again moves focus
+onto the corner tile, and Select swaps (Select again swaps back). Down or Menu
+returns to the menu row.
+
 Leaving the player (Menu) keeps both streams running; the mini player on the
 browse screens shows the main one, with a small PiP mark when a corner stream
 is also playing. Play/Pause while browsing controls the main stream. Coming

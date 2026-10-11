@@ -871,9 +871,14 @@ struct PlayerView: View {
 final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecognizerDelegate {
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var toggleInFlight = false
-    /// Menu presses taken to hide the controls (not passed on).
+    /// Presses taken for ourselves (Menu hiding the controls, presses on the
+    /// corner tile): not passed on, nor their ends.
     private var menusHidingControls = Set<ObjectIdentifier>()
     private weak var menuRecognizer: UIGestureRecognizer?
+    /// Takes Select while the corner tile is highlighted, ahead of the
+    /// focused transport-bar control, to swap instead.
+    private var lastFocusMove = Date.distantPast
+    weak var store: AppStore?
     /// Leave full screen (Menu with nothing on screen but the video).
     var onExit: (() -> Void)?
 
@@ -900,6 +905,94 @@ final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecogniz
         swipe.cancelsTouchesInView = false
         swipe.delegate = self
         view.addGestureRecognizer(swipe)
+        // Up from the transport bar's top row selects the corner tile.
+        let up = UISwipeGestureRecognizer(target: self, action: #selector(upPressed))
+        up.direction = .up
+        up.cancelsTouchesInView = false
+        up.delegate = self
+        view.addGestureRecognizer(up)
+        let upClick = UITapGestureRecognizer(target: self, action: #selector(upPressed))
+        upClick.allowedPressTypes = [NSNumber(value: UIPress.PressType.upArrow.rawValue)]
+        upClick.cancelsTouchesInView = false
+        upClick.delegate = self
+        view.addGestureRecognizer(upClick)
+        let down = UISwipeGestureRecognizer(target: self, action: #selector(downPressed))
+        down.direction = .down
+        down.cancelsTouchesInView = false
+        down.delegate = self
+        view.addGestureRecognizer(down)
+        pipFocus.onFocus = { [weak self] focused in self?.store?.pipHighlighted = focused }
+        view.addSubview(pipFocus)
+        NotificationCenter.default.addObserver(self, selector: #selector(focusMoved),
+                                               name: UIFocusSystem.didUpdateNotification, object: nil)
+    }
+
+    @objc private func focusMoved() { lastFocusMove = Date() }
+
+    // MARK: Corner tile focus
+
+    /// A transparent stand-in for the corner tile (which lives in AVKit's
+    /// content overlay, below the controls, where it can't take focus).
+    private let pipFocus = PipFocusView()
+    /// The transport-bar control focus came from, to go back to.
+    private weak var focusBeforePip: UIView?
+    /// Where an explicit focus move should land (nil: AVKit's choice).
+    private var focusTarget: UIFocusEnvironment?
+
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let t = focusTarget { return [t] }
+        return super.preferredFocusEnvironments
+    }
+
+    private func moveFocus(to target: UIFocusEnvironment?) {
+        focusTarget = target ?? super.preferredFocusEnvironments.first
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
+        focusTarget = nil
+    }
+
+    private var pipHasFocus: Bool { focusedView() === pipFocus }
+
+    /// An Up that AVKit has nowhere to take (focus already on the transport
+    /// bar's top row, so it doesn't move) moves focus to the corner tile.
+    /// Judged by whether focus moved, not by AVKit's private view classes:
+    /// focus must have been still before the Up and stay still just after it.
+    @objc private func upPressed() {
+        guard let store, store.pip != nil, !pipHasFocus,
+              controlsShowing, presentedViewController == nil,
+              Date().timeIntervalSince(lastFocusMove) > 0.4 else { return }
+        let at = Date()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self, self.lastFocusMove < at, self.controlsShowing,
+                  self.presentedViewController == nil, store.pip != nil,
+                  store.pipTileFrame.width > 0 else { return }
+            self.focusBeforePip = focusedView()
+            self.pipFocus.frame = self.view.convert(store.pipTileFrame, from: nil)
+            self.pipFocus.isEnabled = true
+            self.moveFocus(to: self.pipFocus)
+            diag("up with nowhere to go; corner tile focused=\(self.pipHasFocus) frame=\(self.pipFocus.frame)")
+            // AVKit hides its controls after a few idle seconds; don't leave
+            // focus on an invisible tile when it does.
+            while self.pipHasFocus {
+                try? await Task.sleep(for: .milliseconds(500))
+                if !self.controlsShowing || store.pip == nil { self.leavePip(back: false) }
+            }
+            self.pipFocus.isEnabled = false
+        }
+    }
+
+    @objc private func downPressed() {
+        if pipHasFocus { leavePip(back: true) }
+    }
+
+    /// Focus off the corner tile: back to the control it came from, or to
+    /// AVKit's default.
+    private func leavePip(back: Bool) {
+        let target = back ? focusBeforePip : nil
+        pipFocus.isEnabled = false
+        moveFocus(to: target)
+        diag("left the corner tile; focus=\(focusedView().map { String(describing: type(of: $0)) } ?? "nil")")
     }
 
     @objc private func touchedAfterHide() { restoreControls() }
@@ -944,7 +1037,7 @@ final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecogniz
     private var menuIsOurs = false
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive press: UIPress) -> Bool {
-        if g === menuRecognizer { menuIsOurs = !showsPlaybackControls || menuShouldHideControls }
+        if g === menuRecognizer { menuIsOurs = !showsPlaybackControls || pipHasFocus || menuShouldHideControls }
         return true
     }
 
@@ -1015,6 +1108,24 @@ final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecogniz
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if pipHasFocus {
+            // On the corner tile: Select swaps (focus stays, so Select again
+            // swaps back), Down and Menu go back to the transport bar.
+            for press in presses {
+                switch press.type {
+                case .select:
+                    diag("select on the corner tile; swapping")
+                    store?.swapPip()
+                case .downArrow, .menu:
+                    leavePip(back: true)
+                default: continue
+                }
+                menusHidingControls.insert(ObjectIdentifier(press))
+            }
+            let rest = presses.filter { !menusHidingControls.contains(ObjectIdentifier($0)) }
+            if !rest.isEmpty { super.pressesBegan(rest, with: event) }
+            return
+        }
         for press in presses where press.type == .select {
             guard let p = player, videoHasFocus else { continue }
             let wasPaused = p.rate == 0
@@ -1067,6 +1178,7 @@ struct PlayerContainer: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let vc = TabloPlayerViewController()
+        vc.store = store
         vc.onExit = { [weak store] in store?.playerFullScreen = false }
         vc.player = ctl.player
         vc.playbackControlsIncludeInfoViews = true
@@ -1408,6 +1520,17 @@ private struct InfoPanelBody: View {
 
 // MARK: - Picture in picture tile
 
+/// Focusable, invisible, over the corner tile: lets focus move up from the
+/// transport bar onto the tile. The tile draws the highlight.
+final class PipFocusView: UIView {
+    var isEnabled = false
+    var onFocus: ((Bool) -> Void)?
+    override var canBecomeFocused: Bool { isEnabled }
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        onFocus?(context.nextFocusedView === self)
+    }
+}
+
 /// Hosted in the player's content overlay: places the second stream's video
 /// in the chosen corner, inside the safe area, never focusable.
 struct PipOverlayView: View {
@@ -1426,7 +1549,8 @@ struct PipOverlayView: View {
         ZStack(alignment: alignment) {
             Color.clear
             if let p = store.pip {
-                PipTile(ctl: p, width: store.pipSize.width)
+                PipTile(ctl: p, width: store.pipSize.width, highlighted: store.pipHighlighted)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { store.pipTileFrame = $0 }
                     .padding(.horizontal, 40)
                     .padding(.vertical, 30)
                     .transition(.opacity)
@@ -1436,16 +1560,28 @@ struct PipOverlayView: View {
         .animation(.easeInOut(duration: 0.2), value: store.pipCorner)
         .animation(.easeInOut(duration: 0.2), value: store.pipSize)
         .animation(.easeInOut(duration: 0.2), value: store.pip == nil)
+        .animation(.easeInOut(duration: 0.15), value: store.pipHighlighted)
     }
 }
 
 private struct PipTile: View {
     @ObservedObject var ctl: PlaybackController
     let width: CGFloat
+    var highlighted = false
 
     var body: some View {
         ZStack {
             PlayerLayerView(player: ctl.player)
+            if highlighted && ctl.error == nil && ctl.status == nil {
+                VStack {
+                    Spacer()
+                    Label("Select to swap", systemImage: "arrow.left.arrow.right")
+                        .font(.caption).bold()
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(.black.opacity(0.6), in: Capsule())
+                        .padding(.bottom, 12)
+                }
+            }
             if let err = ctl.error {
                 VStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle").font(.title2)
@@ -1467,8 +1603,9 @@ private struct PipTile: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.35), lineWidth: 2)
+                .stroke(Color.white.opacity(highlighted ? 1 : 0.35), lineWidth: highlighted ? 6 : 2)
         )
-        .shadow(color: .black.opacity(0.6), radius: 16, y: 6)
+        .shadow(color: .black.opacity(0.6), radius: highlighted ? 28 : 16, y: 6)
+        .scaleEffect(highlighted ? 1.08 : 1)
     }
 }

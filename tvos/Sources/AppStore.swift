@@ -133,6 +133,11 @@ final class AppStore: ObservableObject {
     @Published var pipCorner: PipCorner {
         didSet { UserDefaults.standard.set(pipCorner.rawValue, forKey: "pipCorner") }
     }
+    /// The corner tile is selected from the remote (Up past the transport
+    /// bar's top row), so Select swaps it with the main stream.
+    @Published var pipHighlighted = false
+    /// Where the corner tile is on screen (window coordinates).
+    var pipTileFrame: CGRect = .zero
     @Published var pipSize: PipSize {
         didSet { UserDefaults.standard.set(pipSize.rawValue, forKey: "pipSize") }
     }
@@ -681,6 +686,7 @@ final class AppStore: ObservableObject {
     /// Exchange the main and picture-in-picture streams. Nothing is re-tuned:
     /// the two players keep playing, only their roles (and the audio) change.
     func swapPip() {
+        pipHighlighted = false
         guard let main = playback, let p = pip else { return }
         diag("swapPip: main \(ObjectIdentifier(main.player)) rate=\(main.player.rate) <-> pip \(ObjectIdentifier(p.player)) rate=\(p.player.rate)")
         playback = p
@@ -693,6 +699,7 @@ final class AppStore: ObservableObject {
     }
 
     func closePip() {
+        pipHighlighted = false
         pip?.teardown()
         pip = nil
     }
