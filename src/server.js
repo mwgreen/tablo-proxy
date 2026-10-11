@@ -10,7 +10,7 @@ import {
   getTunerStatus, scheduleAiring, deleteRecording, stopRecording, getRecordingStatus,
   fetchScheduledAirings,
 } from './tablo.js';
-import { IS_LINUX, FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs, AUDIO_SYNC_ARGS } from './encode.js';
+import { IS_LINUX, FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs, getDeinterlaceArgs, AUDIO_SYNC_ARGS } from './encode.js';
 import { Timeline } from './timeline.js';
 import {
   getLibrary, getArchiveJobs, enqueueArchive, deleteLibraryEntry, getLibraryEntry,
@@ -517,6 +517,7 @@ async function startTranscodeWithId(sessionId, dir, sourceUrl, offset, live = fa
     args.push(
       ...hwInputArgs,
       '-i', sourceUrl,
+      ...getDeinterlaceArgs(),
       ...videoEncArgs,
       '-r', '30',  // Clean 30fps — eliminates AirPlay 29.97/30Hz cadence mismatch
       // VAAPI keeps frames in GPU memory — no pix_fmt conversion needed

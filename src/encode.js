@@ -32,6 +32,34 @@ export function getHwAccelInputArgs() {
   return [];
 }
 
+// Can the VAAPI driver deinterlace on the GPU? Ubuntu's stock
+// intel-media-va-driver is built without the video-processing kernels;
+// intel-media-va-driver-non-free has them.
+let vaapiCanDeinterlace = false;
+if (linuxHwAccel === 'vaapi') {
+  try {
+    execSync(`${FFMPEG} -hide_banner -v error -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -f lavfi -i testsrc=size=64x64:d=0.1 -vf format=nv12,hwupload,deinterlace_vaapi -f null -`, { stdio: 'ignore' });
+    vaapiCanDeinterlace = true;
+  } catch {
+    console.warn('[encode] VAAPI cannot deinterlace (install intel-media-va-driver-non-free); deinterlacing on the CPU');
+  }
+}
+
+// Deinterlace interlaced sources (1080i and 480i channels; 720p passes
+// through). Without it the combing on moving objects is encoded into every
+// frame: subtle shimmer full screen, visible lines in a scaled-down picture.
+// Only frames the source flags as interlaced are touched, and the Tablo flags
+// them reliably. Output stays one frame per source frame.
+export function getDeinterlaceArgs() {
+  if (IS_LINUX && linuxHwAccel === 'vaapi') {
+    return ['-vf', vaapiCanDeinterlace
+      ? 'deinterlace_vaapi=auto=1'
+      : 'hwdownload,format=nv12,yadif=deint=interlaced,format=nv12,hwupload'];
+  }
+  if (IS_LINUX && linuxHwAccel === 'qsv') return [];
+  return ['-vf', 'yadif=deint=interlaced'];
+}
+
 export function getVideoEncodeArgs() {
   if (IS_LINUX && linuxHwAccel === 'vaapi') {
     return [

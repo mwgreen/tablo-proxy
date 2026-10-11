@@ -19,7 +19,7 @@
 import { spawn } from 'child_process';
 import { existsSync, readdirSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs, AUDIO_SYNC_ARGS } from './encode.js';
+import { FFMPEG, linuxHwAccel, getHwAccelInputArgs, getVideoEncodeArgs, getDeinterlaceArgs, AUDIO_SYNC_ARGS } from './encode.js';
 
 
 export const SEG = 4;                 // seconds per output segment
@@ -184,6 +184,7 @@ export class Timeline {
       ...(linuxHwAccel === 'vaapi' ? getHwAccelInputArgs() : []),
       '-i', this.mediaUrl || this.masterUrl,
       ...posOut,
+      ...getDeinterlaceArgs(),
       ...videoEncodeArgs(),
       // Segment boundaries every 4s exactly, so every run cuts identically.
       '-g', String(SEG * FPS),
