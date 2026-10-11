@@ -11,6 +11,15 @@ func diag(_ msg: @autoclosure () -> String) {
     #endif
 }
 
+/// The view with focus, from the key window's focus system
+/// (`UIScreen.main.focusedView` throws on current tvOS).
+@MainActor
+func focusedView() -> UIView? {
+    let window = UIApplication.shared.connectedScenes
+        .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+    return window.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem as? UIView }
+}
+
 /// Per-second playback position, kept apart from PlaybackController so the
 /// info panel can tick without re-rendering the whole player each second.
 @MainActor
@@ -773,7 +782,7 @@ final class PlaybackController: ObservableObject {
                 let t = r.timeRangeValue; return String(format: "%.1f+%.1f", t.start.seconds, t.duration.seconds)
             } ?? []
             let dur = player.currentItem?.duration.seconds ?? .nan
-            let focused = UIScreen.main.focusedView.map { String(describing: type(of: $0)) } ?? "nil"
+            let focused = focusedView().map { String(describing: type(of: $0)) } ?? "nil"
             diag("tick rate=\(player.rate) t=\(String(format: "%.1f", player.currentTime().seconds)) dur=\(dur) seekable=\(sk) focus=\(focused)")
         }
         clock.position = absolutePosition
@@ -976,7 +985,7 @@ final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecogniz
     /// is open over them, which Menu closes as usual).
     private var menuShouldHideControls: Bool {
         guard presentedViewController == nil else { return false }
-        if let v = UIScreen.main.focusedView,
+        if let v = focusedView(),
            String(describing: type(of: v)).contains("OverlayToolCell") { return true }
         return controlsShowing
     }
@@ -1026,7 +1035,7 @@ final class TabloPlayerViewController: AVPlayerViewController, UIGestureRecogniz
     /// True when focus is on the video surface rather than a control in the
     /// transport bar (Channels, Go Live, Jump to, the scrubber...).
     private var videoHasFocus: Bool {
-        guard let v = UIScreen.main.focusedView else { return false }
+        guard let v = focusedView() else { return false }
         return String(describing: type(of: v)).contains("FocusContainer")
     }
 

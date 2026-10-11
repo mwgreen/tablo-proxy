@@ -12,7 +12,7 @@ xcodegen generate >/dev/null
 xcodebuild -project TabloTV.xcodeproj -scheme TabloTV -configuration Debug \
   -destination "platform=tvOS,name=$DEVICE_NAME" -derivedDataPath "$BUILD_DIR" \
   -allowProvisioningUpdates -allowProvisioningDeviceRegistration build -quiet
-DEVICE_ID=$(xcrun devicectl list devices | awk -v n="$DEVICE_NAME" 'index($0, n) == 1 {for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-F-]{36}$/) print $i}' | head -1)
+DEVICE_ID=$(xcrun devicectl list devices | awk -v n="$DEVICE_NAME" 'index($0, n) == 1 {for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-F-]{25,36}$/) print $i}' | head -1)
 [ -n "$DEVICE_ID" ] || { echo "Apple TV '$DEVICE_NAME' not found; is it paired and awake?" >&2; exit 1; }
 xcrun devicectl device install app --device "$DEVICE_ID" "$BUILD_DIR/Build/Products/Debug-appletvos/TabloTV.app" >/dev/null
 xcrun devicectl device process launch --device "$DEVICE_ID" "$BUNDLE_ID" >/dev/null
