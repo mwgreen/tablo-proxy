@@ -51,6 +51,65 @@ function isDeviceUnreachable(e) {
   return /fetch failed|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|ECONNRESET|socket hang up/i.test(e.message || '');
 }
 
+// Node's fetch() wraps the socket error as `cause` ("fetch failed" on its own
+// says nothing). Dig out the errno code, through AggregateError if the host
+// resolved to several addresses.
+function unreachableCode(e) {
+  if (!e) return null;
+  if (e.name === 'AbortError' || e.name === 'TimeoutError') return 'TIMEOUT';
+  if (e.code) return e.code;
+  const c = e.cause;
+  if (!c) return null;
+  if (c.code) return c.code;
+  if (c.errors?.length) return c.errors.find(x => x.code)?.code || null;
+  return unreachableCode(c);
+}
+
+function deviceHost() {
+  try { return new URL(deviceUrl).host; } catch { return deviceUrl; }
+}
+
+// Turn a failed device fetch into something a person can act on. The two
+// cases we have actually seen need different fixes: a refused connection
+// means the box is up but its API service has died (reboot the Tablo); a
+// timeout or unreachable host means the box or the network is down.
+function describeUnreachable(e) {
+  const code = unreachableCode(e);
+  const host = deviceHost();
+  if (code === 'ECONNREFUSED' || code === 'ECONNRESET') {
+    return `The Tablo at ${host} is on the network but its API is not responding (${code}). Rebooting the Tablo usually fixes this.`;
+  }
+  if (code === 'TIMEOUT' || code === 'ETIMEDOUT' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH') {
+    return `Can't reach the Tablo at ${host} (${code}). Check that it is powered on and connected to the network.`;
+  }
+  return `Can't reach the Tablo at ${host} (${code || e.message || 'unknown error'}).`;
+}
+
+// Outage bookkeeping so the journal shows when the device went away and came
+// back, not just a wall of per-request failures.
+let deviceDownSince = null;
+let deviceDownCode = null;
+
+function noteDeviceFailure(e) {
+  const code = unreachableCode(e) || e.message;
+  if (!deviceDownSince) {
+    deviceDownSince = Date.now();
+    deviceDownCode = code;
+    console.warn(`[tablo] Device ${deviceHost()} became unreachable (${code})`);
+  } else if (code !== deviceDownCode) {
+    console.warn(`[tablo] Device still unreachable; error changed ${deviceDownCode} -> ${code}`);
+    deviceDownCode = code;
+  }
+}
+
+function noteDeviceSuccess() {
+  if (!deviceDownSince) return;
+  const mins = ((Date.now() - deviceDownSince) / 60000).toFixed(1);
+  console.log(`[tablo] Device ${deviceHost()} reachable again after ${mins} min (last error ${deviceDownCode})`);
+  deviceDownSince = null;
+  deviceDownCode = null;
+}
+
 let rediscoverInFlight = null;
 
 // Re-resolve the device's LAN URL from the cloud account. The Tablo's IP can
@@ -80,12 +139,23 @@ async function rediscoverDevice() {
 // URL from the current `deviceUrl` so the retry targets the new address.
 async function withRediscover(doFetch) {
   try {
-    return await doFetch();
+    const res = await doFetch();
+    noteDeviceSuccess();
+    return res;
   } catch (e) {
     if (!isDeviceUnreachable(e)) throw e;
-    console.warn(`[tablo] Device unreachable (${e.message}); re-discovering...`);
+    console.warn(`[tablo] Device unreachable (${unreachableCode(e) || e.message}); re-discovering...`);
     await rediscoverDevice();
-    return await doFetch();
+    try {
+      const res = await doFetch();
+      noteDeviceSuccess();
+      return res;
+    } catch (e2) {
+      if (!isDeviceUnreachable(e2)) throw e2;
+      noteDeviceFailure(e2);
+      // Replace "fetch failed" with a message the player can show as-is.
+      throw new Error(describeUnreachable(e2), { cause: e2 });
+    }
   }
 }
 
