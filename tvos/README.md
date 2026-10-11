@@ -103,7 +103,8 @@ Starting it, with something already playing:
   channel in the corner*.
 
 The *Picture in Picture* menu in the player also swaps the two (nothing is
-re-tuned: the two players keep going, only their roles and the audio change),
+re-tuned: each stream carries on in the other's player — the players stay on
+their screens, only the streams, their roles and the audio change),
 pauses/resumes, retries or closes the corner stream, and picks its corner and
 size. Asking to watch what's already in the corner swaps instead of tuning a
 second copy; asking for what's already the main stream does nothing.

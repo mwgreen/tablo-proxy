@@ -679,9 +679,13 @@ final class AppStore: ObservableObject {
     }
 
     /// Exchange the main and picture-in-picture streams. Nothing is re-tuned:
-    /// the two players keep playing, only their roles (and the audio) change.
+    /// each stream carries on in the other's player, so the system player and
+    /// the corner tile keep their own AVPlayers (moving a player between
+    /// surfaces leaves it black on tvOS — see `exchangePlayers`); only the
+    /// roles (and the audio) change.
     func swapPip() {
         guard let main = playback, let p = pip else { return }
+        PlaybackController.exchangePlayers(main, p)
         playback = p
         pip = main
         p.player.isMuted = false
@@ -702,6 +706,10 @@ final class AppStore: ObservableObject {
         guard let main = playback else { return }
         main.teardown()
         if let p = pip {
+            // The corner stream moves into the system player's AVPlayer (the
+            // tile's player goes away with the tile) rather than the system
+            // player being re-pointed at the tile's: see `exchangePlayers`.
+            PlaybackController.exchangePlayers(main, p)
             pip = nil
             playback = p
             p.player.isMuted = false

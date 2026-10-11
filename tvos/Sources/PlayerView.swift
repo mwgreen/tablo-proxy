@@ -37,7 +37,10 @@ final class PlaybackController: ObservableObject {
         case local(LibraryEntry)
     }
 
-    let player = AVPlayer()
+    /// The AVPlayer this stream plays in. Not fixed for life: a picture-in-
+    /// picture swap exchanges the two streams' players (see `exchangePlayers`),
+    /// so always read it fresh rather than keeping a copy.
+    private(set) var player: AVPlayer
     let clock = PlaybackClock()
 
     @Published private(set) var mode: Mode = .idle
@@ -80,7 +83,17 @@ final class PlaybackController: ObservableObject {
     private var diagObs: [NSKeyValueObservation] = []
 
     init() {
+        player = AVPlayer()
         player.automaticallyWaitsToMinimizeStalling = true
+        hookPlayer()
+    }
+
+    deinit {
+        if let t = timeObserver { player.removeTimeObserver(t) }
+    }
+
+    /// Observe the player this controller currently owns.
+    private func hookPlayer() {
         diagObs.append(player.observe(\.timeControlStatus, options: [.new]) { p, _ in
             let st = ["paused", "waiting", "playing"][p.timeControlStatus.rawValue]
             diag("timeControlStatus=\(st) rate=\(p.rate) wait=\(p.reasonForWaitingToPlay?.rawValue ?? "-") seekable=\(p.currentItem?.seekableTimeRanges.map { let r = $0.timeRangeValue; return String(format: "%.1f+%.1f", r.start.seconds, r.duration.seconds) } ?? [])")
@@ -93,8 +106,43 @@ final class PlaybackController: ObservableObject {
         }
     }
 
-    deinit {
+    private func unhookPlayer() {
+        diagObs.removeAll()
         if let t = timeObserver { player.removeTimeObserver(t) }
+        timeObserver = nil
+    }
+
+    /// Exchange the two controllers' AVPlayers, each stream carrying its item
+    /// (position, buffer, proxy session) into the other's player. The streams
+    /// swap places; the players stay where they are.
+    ///
+    /// This is how a picture-in-picture swap must be done. Each on-screen
+    /// surface — the system player (plus the mini player, which shares its
+    /// AVPlayer) and the corner tile's layer — keeps the same AVPlayer for
+    /// good. Moving the *players* between surfaces instead leaves each one,
+    /// for an instant, attached to no layer at all, and on tvOS a player that
+    /// loses its last layer stops producing video and never resumes: the
+    /// stream that was swapped went black, and swapping back blackened both.
+    /// The play/pause state travels with each stream.
+    static func exchangePlayers(_ a: PlaybackController, _ b: PlaybackController) {
+        guard a !== b else { return }
+        let pa = a.player, pb = b.player
+        let itemA = pa.currentItem, itemB = pb.currentItem
+        let playingA = pa.rate != 0, playingB = pb.rate != 0
+        // An item belongs to one player at a time: detach both first.
+        pa.replaceCurrentItem(with: nil)
+        pb.replaceCurrentItem(with: nil)
+        a.unhookPlayer()
+        b.unhookPlayer()
+        a.player = pb
+        b.player = pa
+        a.hookPlayer()
+        b.hookPlayer()
+        pb.replaceCurrentItem(with: itemA)
+        pa.replaceCurrentItem(with: itemB)
+        diag("exchangePlayers: a(playing=\(playingA)) -> \(ObjectIdentifier(pb)), b(playing=\(playingB)) -> \(ObjectIdentifier(pa))")
+        if playingA { pb.play() } else { pb.pause() }
+        if playingB { pa.play() } else { pa.pause() }
     }
 
     // MARK: State
@@ -1094,14 +1142,20 @@ struct PlayerContainer: UIViewControllerRepresentable {
 
         /// Rebuild the transport bar menus only when their content changed;
         /// replacing them while open would dismiss the menu. After a PiP swap
-        /// the main controller is a different object: point the system player
-        /// at its AVPlayer (both keep playing; only the roles change).
+        /// the main controller is a different object, but it now owns the
+        /// AVPlayer the system player already shows (the streams moved, not
+        /// the players: see `PlaybackController.exchangePlayers`), so the
+        /// player is normally left alone — re-pointing it would detach the
+        /// previous player from its last layer and leave it black for good.
         func apply(to vc: AVPlayerViewController, ctl: PlaybackController) {
             if self.ctl !== ctl {
                 self.ctl = ctl
                 signature = ""
             }
-            if vc.player !== ctl.player { vc.player = ctl.player }
+            if vc.player !== ctl.player {
+                diag("PlayerContainer: system player re-pointed at another AVPlayer")
+                vc.player = ctl.player
+            }
             let (items, sig) = buildMenu()
             guard sig != signature else { return }
             signature = sig
