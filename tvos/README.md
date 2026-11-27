@@ -172,7 +172,7 @@ App Store icon, and the Top Shelf banners with Core Graphics into
 
 With Xcode signed in (Settings → Accounts) and the Apple TV paired (Window →
 Devices and Simulators), this builds, signs, installs and launches without the
-Xcode UI. It is also a manual way to renew the free-team install:
+Xcode UI. It installs a separate copy from the one atvloadly manages (see below):
 
 ```sh
 tvos/install-appletv.sh                    # default device: "Entertainment Room"
@@ -185,29 +185,40 @@ Development key; choose Always Allow so unattended renewals don't hang.
 
 ## Keeping it installed: atvloadly on sanctarus
 
-A free Apple ID signs apps with a profile that expires after 7 days. Signing and
-reinstalling run on **sanctarus**, which is always on, through
+Installing runs on **sanctarus**, which is always on, through
 [atvloadly](https://github.com/bitxeno/atvloadly) (Docker, `~/atvloadly/docker-compose.yml`,
-data in `/etc/atvloadly`). Once an app is within 3 days of expiring
-(`advance_days`, set in its Settings), it re-signs the app and installs it on the
-Apple TV over Wi-Fi, trying every 30 minutes from 03:00 to 06:30, so a TV that
-can't be reached on one night is retried on the next. A Mac isn't involved.
+data in `/etc/atvloadly`). A Mac isn't involved.
 
 New code reaches the TV like this: a push to main that touches `tvos/` runs
 `.github/workflows/tvos-ipa.yml`, which builds an unsigned IPA on a GitHub macOS
 runner (`tvos/scripts/build-ipa.sh`) and publishes it as a `tvos-N` release,
 keeping the newest 3. atvloadly checks the release every 6 hours and installs a
-new build automatically.
+new build in its nightly window (every 30 minutes from 03:00 to 06:30). To get a
+build sooner, press Update on the app in the web UI.
 
-- **Web UI:** it has no login and holds the Apple ID, so it listens on
-  localhost only: `ssh -L 5533:localhost:5533 mwgreen@192.168.68.77`, then
-  http://localhost:5533.
-- **Bundle ID:** atvloadly installs the app as `<bundle id>.<TEAM_ID>`. A copy
-  from `install-appletv.sh` is a separate app, so don't mix the two.
+Signing uses the paid developer account (team `TA8B32D228`) in atvloadly's
+"external certificate" mode, with no Apple ID login. TabloTV and StreamingFinder
+(tomato-streams) share one certificate and have one provisioning profile each.
+
+- **Signing files:** the private key, certificate, `.p12`, its password and the
+  profiles are in `~/atvloadly/signing/` on sanctarus. The identities are
+  imported in atvloadly as "Tablo (in place)" and "Streaming Finder (in place)".
+- **Yearly renewal:** the certificate and the profiles expire on 2027-11-27 and
+  atvloadly does not renew them. Before then, create a new Apple Development
+  certificate (the request file is `atv-signing.certSigningRequest`) and a tvOS
+  App Development profile per app at developer.apple.com, import them as new
+  identities (or replace the profile on the existing ones), and reinstall both
+  apps from the web UI.
+- **Quit the app first:** an install hangs at the device step while the app is
+  open on the Apple TV. Force-quit it, then install.
+- **Web UI:** it has no login, so it listens on localhost only:
+  `ssh -L 5533:localhost:5533 mwgreen@192.168.68.77`, then http://localhost:5533.
+- **Bundle ID:** the profile is for `com.mwgreen.tablotv.TA8B32D228`, and the app
+  is installed with that as its custom bundle identifier. A copy from
+  `install-appletv.sh` (`com.mwgreen.tablotv`) is a separate app, so don't mix
+  the two.
 - **After a tvOS update,** re-pair the Apple TV in atvloadly (TV: Settings >
   Remotes and Devices > Remote App and Devices).
-- **Limit:** a free Apple ID keeps at most 3 apps active at once. TabloTV and
-  StreamingFinder (tomato-streams) use two.
 
 
 ### Fallback: refresh from the Mac (retired)
@@ -215,5 +226,5 @@ new build automatically.
 `scripts/refresh.sh` with the launchd agent `scripts/com.mwgreen.tablo-tv-refresh.plist`
 rebuilt and reinstalled the app from the Mac with Xcode signing. It's turned off
 (the plist is parked in `~/Library/LaunchAgents/disabled/`) so it doesn't use
-up the Apple ID's app and certificate slots alongside atvloadly. Its setup notes
+up the account's certificate slots alongside atvloadly. Its setup notes
 are in the header of `scripts/refresh.sh`.
